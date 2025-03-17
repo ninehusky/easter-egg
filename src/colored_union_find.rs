@@ -66,7 +66,8 @@ fn store_id(id: &AtomicId, new: u32) {
 /// for i in 0..n {
 /// assert_eq!(uf.find(&Id(i)).unwrap(), expected[i as usize]);
 /// }
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(not(feature = "concurrent_cufind"), derive(Clone))]
 pub struct ColoredUnionFind {
     translation: BiBTreeMap<Id, usize>,

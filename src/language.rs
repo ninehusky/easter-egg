@@ -1,11 +1,9 @@
-
 use std::convert::{Infallible, TryFrom};
 use std::fmt::{self, Debug, Display};
 use std::hash::Hash;
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 use indexmap::{IndexMap, IndexSet};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 
@@ -301,12 +299,13 @@ impl LanguageChildren for Id {
 /// [`Language`]: trait.Language.html
 /// [ser]: https://docs.rs/serde/latest/serde/trait.Serialize.html
 /// [pretty]: struct.RecExpr.html#method.pretty
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecExpr<L> {
     nodes: Vec<L>,
 }
 
-#[cfg(feature = "serde-1")]
+#[cfg(feature = "serde")]
 impl<L: Language> serde::Serialize for RecExpr<L> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -598,8 +597,11 @@ assert_eq!(runner.egraph.find(runner.roots[0]), runner.egraph.find(just_foo));
 
 pub trait Analysis<L: Language>: Sized + Clone {
     /// The per-[`EClass`](struct.EClass.html) data for this analysis.
-    type Data: Debug + Serialize + for<'a> Deserialize<'a>;
-
+    #[cfg(feature = "serde")]
+    type Data: Debug + serde::Serialize + for<'de> serde::Deserialize<'de>;
+    #[cfg(not(feature = "serde"))]
+    type Data: Debug;
+    
     /// Makes a new [`Analysis`] for a given enode
     /// [`Analysis`].
     ///
@@ -662,7 +664,8 @@ impl<L: Language> Analysis<L> for () {
 }
 
 /// A simple language used for testing.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SymbolLang {
     /// The operator for an enode
     pub op: Symbol,
@@ -810,6 +813,7 @@ mod test {
 
     #[test]
     #[ignore]
+    #[cfg(all(feature = "colored", feature = "serde"))]
     fn test_symbolang_serial() {
         use super::*;
         use serde_cbor;

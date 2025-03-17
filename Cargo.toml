@@ -13,26 +13,27 @@ categories = ["data-structures"]
 [dependencies]
 symbolic_expressions = "5"
 log = "0.4"
-smallvec = { version = "1", features = ["serde"] }
-indexmap = { version = "1.9", features = ["serde"] }
+smallvec = "1"
+indexmap = "2.8"
 instant = "0.1"
 once_cell = "1"
-# for the serde-1 feature
+
 serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11.2"
+
 # for the reports feature
-multimap = "0.9.0"
-itertools = "0.11.0"
-either = {version = "1.9.0", features = ["serde"] }
+multimap = "0.10.0"
+itertools = "0.14.0"
+either = "1.9.0"
 global_counter = "0.2.1"
-bimap = {version = "0.6.2", features = ["serde"]}
+bimap = "0.6.2"
 bitvec = "1.0.0"
 invariants = {path = "../rust-invariants"}
 # for very silly reasons
 num-traits = "0.2.15"
-ordered-float = { version = "1", features = ["serde"] }
+ordered-float = "5.0"
 lazy_static = "1.4.0"
-thiserror = "1.0.31"
+thiserror = "2.0"
 serde_json = "1.0.100"
 regex = "1.9.1"
 rayon = { version = "1.10.0", optional = true }
@@ -40,11 +41,10 @@ crossbeam = { version = "0.8.4", optional = true, features = ["crossbeam-channel
 num_cpus = "1.16.0"
 derive-new = "0.7.0"
 maplit = "1.0.2"
-derive_more = {version = "1.0.0", features = ["display"]}
+derive_more = {version = "2.0", features = ["display"]}
 
 [dev-dependencies]
-env_logger = {version = "0.7", default-features = false}
-ordered-float = "1"
+env_logger = {version = "0.11", default-features = false}
 
 [features]
 default = ["colored", "parallel"]
@@ -60,3 +60,4 @@ keep_splits = []
 parallel = ["rayon", "crossbeam", "concurrent_cufind"]
 concurrent_cufind = []
 invariants-off = ["invariants/off"]
+serde = ["smallvec/serde", "indexmap/serde", "either/serde", "bimap/serde", "ordered-float/serde"]

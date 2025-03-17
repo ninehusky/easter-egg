@@ -10,7 +10,8 @@ use crate::unionfind::UnionFindWrapper;
 
 global_counter!(COLOR_IDS, usize, usize::default());
 
-#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color<L: Language, N: Analysis<L>> {
     color_id: ColorId,
     /// Used for rebuilding uf

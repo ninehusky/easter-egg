@@ -8,7 +8,6 @@ use itertools::{Either, Itertools};
 use itertools::Either::{Right, Left};
 use lazy_static::lazy_static;
 use log::trace;
-use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use crate::expression_ops::{IntoTree, RecExpSlice, Tree};
 use std::sync::atomic::AtomicUsize;
@@ -40,16 +39,19 @@ struct Machine<'a, L: Language, N: Analysis<L>> {
     bind_limit: usize,
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Reg(u32);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Program<L> {
     instructions: Vec<Instruction<L>>,
     subst: Subst,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum Instruction<L> {
     Bind { node: L, eclass: Reg, out: Reg },
     Compare { i: Reg, j: Reg },
@@ -61,7 +63,8 @@ enum Instruction<L> {
     Or { root: Var, sub_progs: Vec<Program<L>>, out: Reg },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum ENodeOrReg<L> {
     ENode(L),
     Reg(Reg),

@@ -26,7 +26,8 @@ pub trait MutUnionFind: UnionFind {
     fn find_mut(&mut self, current: Id) -> Id;
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SimpleUnionFind {
     parents: Vec<Id>,
 }
@@ -114,7 +115,8 @@ impl Merge for () {
 /// This "translates" keys [K] to the internal representation so that external api can use any key.
 /// It also holds an object [T] for each equivalence class which is unioned with the [merge] function.
 /// It won't implement the union find api right now because I don't want to change it at the moment
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnionFindWrapper<T: Merge, K: Clone + Ord> {
     uf: SimpleUnionFind,
     data: Vec<Option<T>>,

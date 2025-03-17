@@ -218,7 +218,8 @@ where FI: FromIterator<T> {
 
 Notably, insert/pop operations have O(1) expected amortized runtime complexity.
 */
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct UniqueQueue<T>
 where
     T: Eq + std::hash::Hash + Clone,

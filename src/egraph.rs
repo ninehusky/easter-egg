@@ -25,7 +25,6 @@ use crate::{OpId, SymbolLang};
 pub use crate::colors::{Color, ColorId};
 use itertools::Itertools;
 use multimap::MultiMap;
-use serde::{Deserialize, Serialize};
 use crate::tools::tools::Grouped;
 use crate::util::UniqueQueue;
 
@@ -191,7 +190,8 @@ assert_eq!(egraph.colored_find(color, x), egraph.colored_find(color, y));
 [extract]: struct.Extractor.html
 [sound]: https://itinerarium.github.io/phoneme-synthesis/?w=/'igraf/
  **/
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EGraph<L: Language, N: Analysis<L>> {
     /// The `Analysis` given when creating this `EGraph`.
     pub analysis: N,

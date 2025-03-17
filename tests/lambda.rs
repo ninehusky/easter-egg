@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 define_language! {
-    #[derive(Serialize, Deserialize)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     enum Lambda {
         Bool(bool),
         Num(i32),
@@ -39,7 +39,8 @@ type EGraph = easter_egg::EGraph<Lambda, LambdaAnalysis>;
 #[derive(Default, Clone)]
 struct LambdaAnalysis;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Data {
     free: HashSet<Id>,
     constant: Option<Lambda>,

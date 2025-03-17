@@ -5,7 +5,6 @@ use thiserror::Error;
 use crate::{Analysis, EGraph, Id, Symbol};
 use crate::ColorId;
 use std::fmt::Formatter;
-use serde::{Deserialize, Serialize};
 
 /// A variable for use in [`Pattern`]s or [`Subst`]s.
 ///
@@ -15,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// [`Pattern`]: struct.Pattern.html
 /// [`Subst`]: struct.Subst.html
 /// [`FromStr`]: https://doc.rust-lang.org/std/str/trait.FromStr.html
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Var(Symbol);
 
 #[derive(Debug, Error)]
@@ -54,7 +54,8 @@ impl fmt::Debug for Var {
 ///
 /// [`Var`]: struct.Var.html
 /// [`Id`]: struct.Id.html
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Subst {
     pub(crate) vec: smallvec::SmallVec<[(Var, Id); 3]>,
     #[cfg(feature = "colored")]

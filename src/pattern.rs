@@ -7,7 +7,6 @@ use crate::{machine, Analysis, Applier, EGraph, Id, Language, RecExpr, Searcher,
 use std::fmt::Formatter;
 use std::str::FromStr;
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A pattern that can function as either a [`Searcher`] or [`Applier`].
@@ -71,7 +70,8 @@ use thiserror::Error;
 /// [`Searcher`]: trait.Searcher.html
 /// [`Applier`]: trait.Applier.html
 /// [`Language`]: trait.Language.html
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pattern<L> {
     /// The actual pattern as a [`RecExpr`](struct.RecExpr.html)
     pub ast: PatternAst<L>,
@@ -114,7 +114,8 @@ impl<L: Language> Pattern<L> {
 /// The language of [`Pattern`]s.
 ///
 /// [`Pattern`]: struct.Pattern.html
-#[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ENodeOrVar<L> {
     /// An enode from the underlying [`Language`](trait.Language.html)
     ENode(L, Option<String>),
@@ -274,7 +275,8 @@ impl<'a> Matches<'a> {
 ///
 /// [`SearchMatches`]: struct.SearchMatches.html
 /// [`Searcher`]: trait.Searcher.html
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SearchMatches {
     /// Mapping of eclasses to their matches.
     pub matches: BTreeMap<Id, BTreeSet<Subst>>,

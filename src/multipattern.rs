@@ -8,7 +8,6 @@ use invariants::dassert;
 use itertools::Itertools;
 use thiserror::Error;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::*;
 use crate::expression_ops::{IntoTree, Tree};
@@ -33,7 +32,8 @@ use crate::searchers::ToDyn;
 /// searcher are unioned with that e-class.
 ///
 /// Multipatterns currently do not support the explanations feature.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiPattern<L> {
     asts: Vec<(Var, PatternAst<L>)>,
     or_asts: Vec<(Var, Vec<PatternAst<L>>)>,
