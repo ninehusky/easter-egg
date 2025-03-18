@@ -351,11 +351,7 @@ impl SearchMatches {
 
 impl<L: Language, A: Analysis<L>> Searcher<L, A> for Pattern<L> {
     fn search_eclass_with_limit(&self, egraph: &EGraph<L, A>, eclass: Id, limit: usize) -> Option<SearchMatches> {
-        if cfg!(feature = "colored") {
-            self.program.colored_run_with_limit(egraph, eclass, None, limit)
-        }  else {
-            self.program.run_with_limit(egraph, eclass, limit)
-        }
+        self.program.colored_run_with_limit(egraph, eclass, None, limit)
     }
 
     fn search(&self, egraph: &EGraph<L, A>) -> Option<SearchMatches> {
@@ -499,7 +495,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "colored")]
     fn single_colored_find() {
         crate::init_logger();
         let mut egraph = EGraph::default();
@@ -556,7 +551,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "colored")]
     fn colored_eq_x_x() {
         crate::init_logger();
         let mut egraph = EGraph::default();
@@ -579,7 +573,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "colored")]
     fn colored_eclass_search_sanity() {
         // Create an egraph with x and colored f(x) merged with black y
         crate::init_logger();

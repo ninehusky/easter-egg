@@ -58,7 +58,6 @@ impl fmt::Debug for Var {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Subst {
     pub(crate) vec: smallvec::SmallVec<[(Var, Id); 3]>,
-    #[cfg(feature = "colored")]
     pub(crate) color: Option<ColorId>,
 }
 
@@ -80,7 +79,6 @@ impl Subst {
         }
     }
 
-    #[cfg(feature = "colored")]
     pub fn colored_with_capacity(capacity: usize, color: Option<ColorId>) -> Self {
         Self {
             vec: smallvec::SmallVec::with_capacity(capacity),
@@ -107,7 +105,6 @@ impl Subst {
             .find_map(|(v, id)| if *v == var { Some(id) } else { None })
     }
 
-    #[cfg(feature = "colored")]
     pub fn color(&self) -> Option<ColorId> {
         self.color
     }
@@ -157,9 +154,7 @@ impl fmt::Debug for Subst {
                 write!(f, ", ")?;
             }
         }
-        if cfg!(feature = "colored") {
-            write!(f, " color: {}", self.color.map_or("None".to_string(), |x| x.to_string()))?;
-        }
+        write!(f, " color: {}", self.color.map_or("None".to_string(), |x| x.to_string()))?;
         write!(f, "}}")
     }
 }

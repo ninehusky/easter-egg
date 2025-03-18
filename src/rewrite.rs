@@ -384,9 +384,6 @@ pub trait Applier<L, N>: std::fmt::Display
                         .apply_one(egraph, *eclass, subst)
                         .into_iter()
                         .filter_map(|id| {
-                            if !cfg!(feature = "colored") {
-                                iassert!(subst.color().is_none());
-                            }
                             let (to, did_something) =
                                 egraph.opt_colored_union(subst.color(), id, *eclass);
                             if did_something {

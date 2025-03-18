@@ -813,7 +813,7 @@ mod test {
 
     #[test]
     #[ignore]
-    #[cfg(all(feature = "colored", feature = "serde"))]
+    #[cfg(feature = "serde")]
     fn test_symbolang_serial() {
         use super::*;
         use serde_cbor;

@@ -28,7 +28,6 @@ struct Machine<'a, L: Language, N: Analysis<L>> {
     reg: Vec<Id>,
     // a buffer to re-use for lookups
     lookup: Vec<Id>,
-    #[cfg(feature = "colored")]
     color: Option<ColorId>,
     egraph: &'a EGraph<L, N>,
     instructions: &'a [Instruction<L>],
@@ -543,20 +542,20 @@ impl<L: Language> Compiler<L> {
 
         let mut first_bind = true;
         while let Some(((id, mut reg), node)) = self.next() {
-            if self.is_ground_now(id) && (!node.is_leaf()) && !cfg!(feature = "colored") {
-                let extracted = pattern.extract(id);
-                self.instructions.push(Instruction::Lookup {
-                    i: reg,
-                    term: extracted
-                        .as_ref()
-                        .iter()
-                        .map(|n| match n {
-                            ENodeOrVar::ENode(n, _name) => ENodeOrReg::ENode(n.clone()),
-                            ENodeOrVar::Var(v) => ENodeOrReg::Reg(self.v2r[v]),
-                        })
-                        .collect(),
-                });
-            } else {
+            // if self.is_ground_now(id) && (!node.is_leaf()) && !cfg!(feature = "colored") {
+            //     let extracted = pattern.extract(id);
+            //     self.instructions.push(Instruction::Lookup {
+            //         i: reg,
+            //         term: extracted
+            //             .as_ref()
+            //             .iter()
+            //             .map(|n| match n {
+            //                 ENodeOrVar::ENode(n, _name) => ENodeOrReg::ENode(n.clone()),
+            //                 ENodeOrVar::Var(v) => ENodeOrReg::Reg(self.v2r[v]),
+            //             })
+            //             .collect(),
+            //     });
+            // } else {
                 if !first_bind {
                     self.introduce_color_jump(next_out, reg);
                     reg = next_out;
@@ -579,7 +578,7 @@ impl<L: Language> Compiler<L> {
                     self.add_todo(pattern, child, Reg(out.0 + i as u32));
                 }
             }
-        }
+        // }
         self.next_reg = next_out;
     }
 

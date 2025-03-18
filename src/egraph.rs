@@ -207,14 +207,10 @@ pub struct EGraph<L: Language, N: Analysis<L>> {
     /// Classes indexed by op id.
     pub(crate) classes_by_op: BTreeMap<OpId, IndexSet<Id>>,
     // --- Colored fields (only compiled if "colored" is enabled) ---
-    #[cfg(feature = "colored")]
     colors: Vec<Option<Color<L, N>>>,
     /// Colors with "no" parents are children of main UF (i.e. black) and are tracked here.
-    #[cfg(feature= "colored")]
     base_colors: Vec<ColorId>,
-    #[cfg(feature = "colored")]
     pub(crate) colored_memo: BTreeMap<ColorId, IndexMap<L, Id>>,
-    #[cfg(feature = "colored")]
     // TODO: Can I remove this?
     colored_equivalences: IndexMap<Id, BTreeSet<ColorId>>,
     #[cfg(feature = "keep_splits")]
@@ -279,15 +275,10 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             pending: Default::default(),
             analysis_pending: Default::default(),
             classes_by_op: Default::default(),
-            #[cfg(feature = "colored")]
             base_colors: Default::default(),
-            #[cfg(feature = "colored")]
             colors: Default::default(),
-            #[cfg(feature = "colored")]
             colored_memo: Default::default(),
-            #[cfg(feature = "colored")]
             colored_equivalences: Default::default(),
-            #[cfg(feature = "colored")]
             cases_colors: Default::default(),
             vacuity_ops: Default::default(),
             #[cfg(feature = "keep_splits")]
@@ -347,11 +338,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// assert_eq!(egraph.number_of_classes(), 1);
     /// ```
     pub fn total_size(&self) -> usize {
-        self.memo.len() + if cfg!(feature = "colored") {
-            self.colored_memo.iter().map(|(_, m)| m.len()).sum()
-        } else {
-            0
-        }
+        self.memo.len() + self.colored_memo.iter().map(|(_, m)| m.len()).sum::<usize>()
     }
 
     /// Iterates over the classes, returning the total number of nodes.
@@ -673,16 +660,14 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         tassert!(to == self.find(id1));
         tassert!(to == self.find(id2));
         if changed {
-            if cfg!(feature = "colored") {
-                // An unsafe hack that is fine because we only use the union find of the egraph in inner
-                // black union:
-                let colors = self.base_colors.clone();
-                let todo = colors.into_iter()
-                    .flat_map(|color| self.inner_base_union(color, to, from))
-                    .collect_vec();
-                for (id1, id2) in todo {
-                    self.union(id1, id2);
-                }
+            // An unsafe hack that is fine because we only use the union find of the egraph in inner
+            // black union:
+            let colors = self.base_colors.clone();
+            let todo = colors.into_iter()
+                .flat_map(|color| self.inner_base_union(color, to, from))
+                .collect_vec();
+            for (id1, id2) in todo {
+                self.union(id1, id2);
             }
 
             #[cfg(feature = "colored_no_cmemo")]
@@ -714,7 +699,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             concat(&mut to_class.nodes, from_class.nodes);
             concat(&mut to_class.parents, from_class.parents);
             concat(&mut to_class.changed_parents, from_class.changed_parents);
-            #[cfg(feature = "colored")]
             from_class
                 .colored_parents
                 .into_iter()
@@ -819,7 +803,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 }
 
 // Colored implementation
-#[cfg(feature = "colored")]
 impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     
     /// Adds a [`RecExpr`] to the [`EGraph`].
@@ -1752,7 +1735,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 }
 
 // ***  Colored Implementation  ***
-#[cfg(feature = "colored")]
 impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     #[allow(missing_docs)]
     pub fn create_sub_color(&mut self, color: ColorId) -> ColorId {
@@ -1994,7 +1976,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.colored_memo.iter().map(|(c, m)| (*c, m.len()))
     }
 
-    #[cfg(feature = "colored")]
     pub fn detect_color_vacuity(&self) -> BTreeSet<ColorId> {
         let mut res: BTreeSet<ColorId> = Default::default();
         self.vacuity_ops.iter().for_each(|s| s.search(self).iter().for_each(|sms| {
@@ -2054,7 +2035,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     }
 }
 
-#[cfg(feature = "colored")]
 impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// Create a new color which is based on given colors. This should be used only if the new color
     /// has no assumptions of it's own (i.e. it is only a combination of existing assumptions).
@@ -2905,7 +2885,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "colored")]
     fn test_colored_vacuity_check_sanity() {
         init_logger();
 
