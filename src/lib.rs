@@ -36,7 +36,6 @@ mod machine;
 mod pattern;
 mod rewrite;
 mod run;
-mod ser;
 mod subst;
 mod unionfind;
 mod util;
@@ -125,7 +124,6 @@ pub use {
     multipattern::MultiPattern,
     rewrite::{Applier, Rewrite, Searcher},
     run::*,
-    ser::{Serialization, Deserialization},
     subst::{Subst, Var},
     util::*,
     eggstentions::*,
@@ -143,6 +141,5 @@ pub mod test;
 mod colors;
 mod eggstentions;
 pub mod tools;
-pub mod colored_union_find;
 mod multipattern;
 

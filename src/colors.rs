@@ -10,12 +10,14 @@ use crate::unionfind::UnionFindWrapper;
 
 global_counter!(COLOR_IDS, usize, usize::default());
 
+pub const BLACK_COLOR: ColorId = ColorId(0);
+
 #[derive(Clone, Default, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color<L: Language, N: Analysis<L>> {
     color_id: ColorId,
     /// Used for rebuilding uf
-    pub(crate) dirty_unions: Vec<Id>,
+    pub(crate) pending: Vec<Id>,
     /// Maintain which classes in black are represented in colored class (including rep)
     pub(crate) equality_classes: IndexMap<Id, IndexSet<Id>>,
     /// Used to implement a union find. Opposite function of `equality_classes`.
@@ -49,7 +51,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         });
         Color {
             color_id: new_id,
-            dirty_unions: Default::default(),
+            pending: Default::default(),
             equality_classes: Default::default(),
             union_find: Default::default(),
             black_colored_classes: Default::default(),
@@ -90,7 +92,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         })
     }
 
-    pub fn is_dirty(&self) -> bool { !self.dirty_unions.is_empty() }
+    pub fn is_dirty(&self) -> bool { !self.pending.is_empty() }
 
     /// Removes equality of `base_to` and `base_from` in the color.
     /// `base_to` Should be the id of "to" (after running find in the parent)
@@ -171,7 +173,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
                 let ids = self.equality_classes.get(&colored_to).map(|x| x.iter().copied().collect_vec());
                 self.union_find.remove(&base_from, ids.map(|x| x.into_iter()));
             }
-            self.dirty_unions.push(colored_to);
+            self.pending.push(colored_to);
 
             // If both color classes existed it will update colored enodes classes.
             let mut todo_res = {
@@ -202,7 +204,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         let changed = to != from;
         let g_todo = self.update_black_classes(to, from).into_iter().collect_vec();
         if changed {
-            self.dirty_unions.push(to);
+            self.pending.push(to);
             let from_ids = self.equality_classes.remove(&from).unwrap_or_else(|| IndexSet::singleton(from));
             self.equality_classes.entry(to).or_insert_with(|| IndexSet::singleton(to)).extend(from_ids);
         }
