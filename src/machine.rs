@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::cmp::max;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use crate::*;
@@ -10,15 +11,15 @@ use lazy_static::lazy_static;
 use log::trace;
 use smallvec::{SmallVec, smallvec};
 use crate::expression_ops::{IntoTree, RecExpSlice, Tree};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 
 lazy_static! {
-    static ref BIND_LIMIT: AtomicUsize = AtomicUsize::new(1000);
+    static ref BIND_LIMIT: AtomicI32 = AtomicI32::new(1000);
 }
 
 pub fn set_global_bind_limit(limit: usize) {
-    BIND_LIMIT.store(limit, Ordering::Relaxed);
+    BIND_LIMIT.store(limit as i32, Ordering::Relaxed);
 }
 
 type EarlyStopFn<'a, L, N> = Rc<RefCell<dyn FnMut(&Machine<'a, L, N>) -> bool>>;
@@ -35,7 +36,7 @@ struct Machine<'a, L: Language, N: Analysis<L>> {
     add_colors: bool,
     stack: Vec<MachineContext>,
     early_stop: Option<EarlyStopFn<'a, L, N>>,
-    bind_limit: usize,
+    bind_limit: i32,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -54,6 +55,8 @@ pub struct Program<L> {
 enum Instruction<L> {
     Bind { node: L, eclass: Reg, out: Reg },
     Compare { i: Reg, j: Reg },
+    // Should be possible to preprocess for each color once we have a set of "interesting" terms.
+    // During rebuild we canonize all enodes to said color, so the term lookup should be easy.
     Lookup { term: Vec<ENodeOrReg<L>>, i: Reg },
     Scan { out: Reg, top_pat: Either<L, Option<Reg>> },
     ColorJump { orig: Reg, out: Reg },
@@ -69,56 +72,15 @@ enum ENodeOrReg<L> {
     Reg(Reg),
 }
 
-#[inline(always)]
-fn for_each_matching_node<L, D>(
-    eclass: &EClass<L, D>,
-    node: &L,
-    mut f: impl FnMut(&L) -> (),
-)
-    where
-        L: Language,
-{
-    #[allow(enum_intrinsics_non_enums)]
-    if eclass.nodes.len() < 50 {
-        eclass
-            .nodes
-            .iter()
-            .filter(|n| node.matches(n))
-            .for_each(f)
-    } else {
-        debug_assert!(node.children().iter().all(|id| *id == Id::from(0)));
-        debug_assert!(eclass.nodes.windows(2).all(|w| w[0] < w[1]));
-        let start = eclass.nodes.binary_search(node).unwrap_or_else(|i| i);
-        let matching = eclass.nodes[..start].iter().rev()
-            .take_while(|x| node.matches(x))
-            .chain(eclass.nodes[start..].iter().take_while(|x| node.matches(x)));
-        debug_assert_eq!(
-            matching.clone().count(),
-            eclass.nodes.iter().filter(|n| node.matches(n)).count(),
-            "matching node {:?}\nstart={}\n{:?} != {:?}\nnodes: {:?}",
-            node,
-            start,
-            matching.clone().collect::<IndexSet<_>>(),
-            eclass
-                .nodes
-                .iter()
-                .filter(|n| node.matches(n))
-                .collect::<IndexSet<_>>(),
-            eclass.nodes
-        );
-        matching.for_each(&mut f);
-    }
-}
-
 struct MachineContext {
     instruction_index: usize,
     color: Option<ColorId>,
     truncate: usize,
-    to_push: SmallVec<[Id; 4]>,
+    to_push: SmallVec<[Id; 8]>,
 }
 
 impl MachineContext {
-    fn new(instruction_index: usize, color: Option<ColorId>, truncate: usize, to_push: SmallVec<[Id; 4]>) -> Self {
+    fn new(instruction_index: usize, color: Option<ColorId>, truncate: usize, to_push: SmallVec<[Id; 8]>) -> Self {
         Self {
             instruction_index,
             color,
@@ -155,6 +117,60 @@ impl<'a, L: Language, A: Analysis<L>> Machine<'a, L, A> {
     #[inline(always)]
     fn reg(&self, reg: Reg) -> Id {
         self.reg[reg.0 as usize]
+    }
+
+    #[inline(always)]
+    fn for_each_matching_node<D>(
+        &mut self,
+        eclass: &EClass<L, D>,
+        node: &L,
+        index: usize,
+        out: &Reg,
+    )
+        where
+            L: Language,
+    {
+        #[allow(enum_intrinsics_non_enums)]
+        if eclass.nodes.len() < 50 {
+            eclass
+                .nodes
+                .iter()
+                .filter(|n| node.matches(n))
+                .for_each(|m| self.run_foreach(index, out, m));
+        } else {
+            debug_assert!(node.children().iter().all(|id| *id == Id::from(0)));
+            debug_assert!(eclass.nodes.windows(2).all(|w| w[0] < w[1]));
+            let start = eclass.nodes.binary_search(node).unwrap_or_else(|i| i);
+            let matching = eclass.nodes[..start].iter().rev()
+                .take_while(|x| node.matches(x))
+                .chain(eclass.nodes[start..].iter().take_while(|x| node.matches(x)));
+            debug_assert_eq!(
+                matching.clone().count(),
+                eclass.nodes.iter().filter(|n| node.matches(n)).count(),
+                "matching node {:?}\nstart={}\n{:?} != {:?}\nnodes: {:?}",
+                node,
+                start,
+                matching.clone().collect::<IndexSet<_>>(),
+                eclass
+                    .nodes
+                    .iter()
+                    .filter(|n| node.matches(n))
+                    .collect::<IndexSet<_>>(),
+                eclass.nodes
+            );
+            for m in matching {
+                self.run_foreach(index, out, m);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn run_foreach(&mut self, index: usize, out: &Reg, matched: &L) {
+        let out = *out;
+        trace!("Pusing to stack color: {:?}, truncate to {} and push {}", self.color, out.0, matched.children().iter().join(", "));
+        let to_push = SmallVec::from_slice(matched.children());
+        self.bind_limit -= 1;
+        self.stack.push(MachineContext::new(index + 1, self.color, out.0 as usize, to_push));
     }
 }
 
@@ -193,13 +209,7 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                         trace!("Instruction index {} - Binding (cur color: {:?}) node {} @ {} (color: {:?}) for out reg {}", index, self.color, node.display_op(), self.reg(*eclass), class_color, out.0);
                         dassert!(class_color.is_none() || class_color == self.color
                             || (self.color.is_some() && egraph.get_colors_parents(self.color.unwrap()).contains(&class_color.unwrap())));
-                        for_each_matching_node(&egraph[self.reg(*eclass)], node, |matched| {
-                            let out = *out;
-                            trace!("Pusing to stack color: {:?}, truncate to {} and push {}", self.color, out.0, matched.children().iter().join(", "));
-                            let to_push = SmallVec::from_slice(matched.children());
-                            self.bind_limit -= 1;
-                            self.stack.push(MachineContext::new(index + 1, self.color, out.0 as usize, to_push));
-                        });
+                        self.for_each_matching_node(&egraph[self.reg(*eclass)], node, index, out);
                         break;
                     }
                     Instruction::Scan { out, top_pat } => {
@@ -761,11 +771,11 @@ impl<L: Language> Program<L> {
                  opt_color, class_color);
         let opt_color = class_color;
         let mut machine = Machine::new(opt_color, egraph, &self.instructions, self.subst.clone(), run_color);
-        let bind_limit = machine.bind_limit;
+        let bind_limit = machine.bind_limit as u32;
         assert_eq!(machine.reg.len(), 0);
         machine.reg.push(eclass);
         let matches = (&mut machine).take(limit).collect_vec();
-        let bound = bind_limit - machine.bind_limit;
+        let bound = bind_limit - (max(machine.bind_limit, 0) as u32);
         log::trace!("Ran program, found {:?}", matches);
         if matches.is_empty() {
             None

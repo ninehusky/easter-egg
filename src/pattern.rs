@@ -281,7 +281,7 @@ pub struct SearchMatches {
     /// Mapping of eclasses to their matches.
     pub matches: BTreeMap<Id, BTreeSet<Subst>>,
     /// A measure of runtime is how many e-nodes were bound during search
-    pub binds_done: usize,
+    pub binds_done: u32,
 }
 
 impl Default for SearchMatches {
@@ -338,7 +338,7 @@ impl SearchMatches {
         })
     }
 
-    pub fn collect_matches<L: Language, A: Analysis<L>>(egraph: &EGraph<L, A>, eclass: Id, substs: Vec<Subst>, binds_done: usize) -> SearchMatches {
+    pub fn collect_matches<L: Language, A: Analysis<L>>(egraph: &EGraph<L, A>, eclass: Id, substs: Vec<Subst>, binds_done: u32) -> SearchMatches {
         let mut matches: BTreeMap<Id, BTreeSet<Subst>> = BTreeMap::default();
         for mut s in substs {
             s.fix(egraph);

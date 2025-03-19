@@ -507,7 +507,7 @@ where
         let search_binds = matches.iter().enumerate().map(|(ri, m)| {
             let name: Symbol = rules[ri].name().into();
             let binds = m.as_ref().map(|x| x.binds_done);
-            (name, SearchMetadata::new(m.as_ref().map(|x| x.total_substs()).unwrap_or(0), binds.unwrap_or(0)))
+            (name, SearchMetadata::new(m.as_ref().map(|x| x.total_substs()).unwrap_or(0), binds.unwrap_or(0) as usize))
         }).collect::<IndexMap<_, _>>();
         self.scheduler = sched;
         // Done with sched limitation
