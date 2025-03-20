@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
+use crate::SimpleUnionFind;
 pub use crate::{Id, EGraph, Language, Analysis, ColorId};
-use crate::Singleton;
+use crate::{unionfind::UnionFind, Singleton};
 use crate::util::JoinDisp;
+use as_any::Downcast;
 use invariants::dassert;
 use itertools::Itertools;
 use std::fmt::Formatter;
 use indexmap::{IndexMap, IndexSet};
 use crate::unionfind::UnionFindWrapper;
 
-global_counter!(COLOR_IDS, usize, usize::default());
-
 pub const BLACK_COLOR: ColorId = ColorId(0);
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color<L: Language, N: Analysis<L>> {
     color_id: ColorId,
@@ -22,7 +22,7 @@ pub struct Color<L: Language, N: Analysis<L>> {
     pub(crate) equality_classes: IndexMap<Id, IndexSet<Id>>,
     /// Used to implement a union find. Opposite function of `equality_classes`.
     /// Supports removal of elements when they are not needed.
-    union_find: UnionFindWrapper<(), Id>,
+    union_find: Box<dyn UnionFind<Id>>,
     /// Used to determine for each a colored equality class what is the black colored class.
     /// Relevant when a colored edge was added.
     pub(crate) black_colored_classes: IndexMap<Id, Id>,
@@ -49,11 +49,16 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
             res.push(p);
             res
         });
+        let union_find: Box<dyn UnionFind<Id>> = if parent.is_none() {
+            Box::new(SimpleUnionFind::default())
+        } else {
+            Box::new(UnionFindWrapper::default())
+        };
         Color {
             color_id: new_id,
             pending: Default::default(),
             equality_classes: Default::default(),
-            union_find: Default::default(),
+            union_find,
             black_colored_classes: Default::default(),
             children: vec![],
             parent,
@@ -76,8 +81,8 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
 
     pub(crate) fn verify_uf_minimal(&self, egraph: &EGraph<L, N>) {
         let mut parents: IndexMap<Id, usize> = IndexMap::default();
-        for (k, _v) in self.union_find.iter() {
-            let v = self.find(egraph, *k);
+        for k in self.union_find.iter() {
+            let v = self.find(egraph, k);
             *parents.entry(v).or_default() += 1;
         }
         for (k, v) in parents {
@@ -87,9 +92,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
 
     pub fn find(&self, egraph: &EGraph<L, N>, id: Id) -> Id {
         let fixed = self.parent().map_or_else(|| egraph.find(id), |c_id| egraph.colored_find(c_id, id));
-        self.union_find.find(&fixed).unwrap_or_else(|| {
-            fixed
-        })
+        self.union_find.find(fixed)
     }
 
     pub fn is_dirty(&self) -> bool { !self.pending.is_empty() }
@@ -148,17 +151,15 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
 
     // Assumes to and from canonised to the base (parent, black or colored) and !=
     pub(crate) fn inner_base_union(&mut self, egraph: &mut EGraph<L, N>, base_to: Id, base_from: Id) -> Vec<(Id, Id)> {
-        let orig_to = self.union_find.find(&base_to);
-        let orig_from = self.union_find.find(&base_from);
-        let from_existed = orig_from.is_some();
+        let uf: &mut UnionFindWrapper<Id> = self.union_find.downcast_mut().unwrap();
+        let from_existed = uf.contains(&base_from);
+        let to_existed = uf.contains(&base_to);
+        let orig_to = uf.find(base_to);
+        let orig_from = uf.find(base_from);
 
-        let (colored_to, colored_from) = if orig_to.is_some() || orig_from.is_some() {
+        let (colored_to, colored_from) = if to_existed || from_existed {
             // This part only needs to happen if one of the two is in the union find.
-            let orig_to = orig_to.unwrap_or(base_to);
-            let orig_from = orig_from.unwrap_or(base_from);
-            self.union_find.insert(orig_to, ());
-            self.union_find.insert(orig_from, ());
-            self.union_find.union(&orig_to, &orig_from).unwrap()
+            uf.union(orig_to, orig_from)
         } else {
             (base_to, base_from)
         };
@@ -166,12 +167,13 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         // We need to update equalities.
         self.remove_equality(base_to, base_from, colored_to, colored_from);
 
+        let uf: &mut UnionFindWrapper<Id> = self.union_find.downcast_mut().unwrap();
+
         // In case both were not colored union_find.remove will not have any effect which is good.
         if colored_to != colored_from {
             if from_existed {
                 // Only need to update children in "this" union find.
-                let ids = self.equality_classes.get(&colored_to).map(|x| x.iter().copied().collect_vec());
-                self.union_find.remove(&base_from, ids.map(|x| x.into_iter()));
+                uf.remove(&base_from);
             }
             self.pending.push(colored_to);
 
@@ -198,9 +200,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
     // Assumed id1 and id2 are parent canonized
     pub(crate) fn inner_colored_union(&mut self, id1: Id, id2: Id) -> (Id, Id, bool, Vec<(Id, Id)>) {
         // Parent classes will be updated in black union to come.
-        self.union_find.insert(id1, ());
-        self.union_find.insert(id2, ());
-        let (to, from) = self.union_find.union(&id1, &id2).unwrap();
+        let (to, from) = self.union_find.union(id1, id2);
         let changed = to != from;
         let g_todo = self.update_black_classes(to, from).into_iter().collect_vec();
         if changed {
