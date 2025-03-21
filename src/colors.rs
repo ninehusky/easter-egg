@@ -50,7 +50,9 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
             res
         });
         let union_find: Box<dyn UnionFind<Id>> = if parent.is_none() {
-            Box::new(SimpleUnionFind::default())
+            // Box::new(SimpleUnionFind::default())
+            // TODO: When remove optional color, this should go back to simple
+            Box::new(UnionFindWrapper::default())
         } else {
             Box::new(UnionFindWrapper::default())
         };
@@ -151,7 +153,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
 
     // Assumes to and from canonised to the base (parent, black or colored) and !=
     pub(crate) fn inner_base_union(&mut self, egraph: &mut EGraph<L, N>, base_to: Id, base_from: Id) -> Vec<(Id, Id)> {
-        let uf: &mut UnionFindWrapper<Id> = self.union_find.downcast_mut().unwrap();
+        let uf: &mut UnionFindWrapper<Id> = self.union_find.as_mut().downcast_mut().unwrap();
         let from_existed = uf.contains(&base_from);
         let to_existed = uf.contains(&base_to);
         let orig_to = uf.find(base_to);
@@ -167,7 +169,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         // We need to update equalities.
         self.remove_equality(base_to, base_from, colored_to, colored_from);
 
-        let uf: &mut UnionFindWrapper<Id> = self.union_find.downcast_mut().unwrap();
+        let uf: &mut UnionFindWrapper<Id> = self.union_find.as_mut().downcast_mut().unwrap();
 
         // In case both were not colored union_find.remove will not have any effect which is good.
         if colored_to != colored_from {
