@@ -254,6 +254,7 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         return res.into_iter().collect_vec();
     }
 
+    #[inline(always)]
     pub fn assert_black_ids(&self, egraph: &EGraph<L, N>) {
         // Check that black ids are actually black representatives
         dassert!({

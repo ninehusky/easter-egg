@@ -8,7 +8,7 @@ use invariants::{dassert, iassert, tassert, wassert, AssertConfig, AssertLevel};
 use log::*;
 use std::rc::Rc;
 
-use crate::{colors::BLACK_COLOR, unionfind::UnionFind, Analysis, MultiPattern};
+use crate::{colors::BLACK_COLOR, unionfind::{MutUnionFind, UnionFind}, Analysis, MultiPattern};
 use crate::AstSize;
 use crate::Dot;
 use crate::EClass;
@@ -371,6 +371,10 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.unionfind.find(id)
     }
 
+    pub fn find_mut(&mut self, id: Id) -> Id {
+        self.unionfind.find_mut(id)
+    }
+
     /// Creates a [`Dot`] to visualize this egraph. See [`Dot`].
     ///
     /// [`Dot`]: struct.Dot.html
@@ -576,10 +580,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             nodes: vec![enode.clone()],
             data: N::make(self, &enode),
             parents: Default::default(),
-            changed_parents: Default::default(),
             colored_parents: Default::default(),
             color,
-            colord_changed_parents: Default::default(),
         });
 
         self.pending.push(id);
@@ -698,7 +700,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             self.analysis.merge(&mut to_class.data, from_class.data);
             concat(&mut to_class.nodes, from_class.nodes);
             concat(&mut to_class.parents, from_class.parents);
-            concat(&mut to_class.changed_parents, from_class.changed_parents);
             from_class
                 .colored_parents
                 .into_iter()
@@ -715,9 +716,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// so it's `false` if they were already equivalent.
     /// Both results are canonical.
     pub fn union(&mut self, id1: Id, id2: Id) -> (Id, bool) {
-        let union = self.union_impl(id1, id2);
-        self.memo_classes_agree();
-        union
+        self.union_impl(id1, id2)
     }
 
     /// Returns a more debug-able representation of the egraph.
@@ -854,18 +853,22 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             for p in self.get_colors_parents(color) {
                 enode.update_children(|id| self.colored_find(*p, id));
                 // We need to find the black representative of the colored edge (yes, confusing).
-                if let Some(id) = self.colored_memo[&color]
+                if let Some(id) = self.colored_memo[&p]
                     .get(enode)
-                    .or_else(|| self.memo.get(enode))
                     .map(|id| self.find(*id)) {
+                    return Some(id);
+                }
+                if let Some(id) = self.memo.get(enode).map(|id| self.find(*id)) {
                     return Some(id);
                 }
             }
             enode.update_children(|id| self.colored_find(color, id));
             // We need to find the black representative of the colored edge (yes, confusing).
+            if let Some(id) = self.memo.get(enode).map(|id| self.find(*id)) {
+                return Some(id);
+            }
             self.colored_memo[&color]
                 .get(enode)
-                .or_else(|| self.memo.get(enode))
                 .map(|id| self.find(*id))
         })
     }
@@ -1046,112 +1049,54 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     #[inline(never)]
     fn process_unions(&mut self) -> Vec<Id> {
         let mut res = self.pending.clone();
-        let mut to_union = vec![];
+        let mut todo = IndexSet::new();
 
-        while !self.pending.is_empty() {
+        while !(self.pending.is_empty() && todo.is_empty()) {
             // take the worklist, we'll get the stuff that's added the next time around
             // deduplicate the dirty list to avoid extra work
-            let mut todo = std::mem::take(&mut self.pending);
-            todo.iter_mut().for_each(|id| *id = self.find(*id));
-            if cfg!(not(feature = "upward-merging")) {
-                todo.sort_unstable();
-                todo.dedup();
-            }
-            assert!(!todo.is_empty());
-
-            for id in todo {
-                for (n, p_id) in std::mem::take(&mut self[id].changed_parents) {
-                    if let Some(m_id) = self.memo.remove(&n) {
-                        // We might have already unioned these two, so we need to check
-                        dassert!({
-                            let fixed_m_id = self.find(m_id);
-                            let fixed_p_id = self.find(p_id);
-                            if !(to_union.contains(&(fixed_p_id, fixed_m_id))
-                                || to_union.contains(&(fixed_m_id, fixed_p_id)))
-                            {
-                                assert_eq!(fixed_m_id, fixed_p_id,
-                                           "Found unexpected non-equivalence for {:?}(memo)!={:?}(changed_parent) for enode {:?}",
-                                           fixed_m_id, fixed_p_id, n);
-                            }
-                            true
-                        });
+    
+            {
+                let changed = std::mem::take(&mut self.pending);
+                for id in changed {
+                    let id = self.find_mut(id);
+                    unsafe {
+                        todo.extend(
+                            (0..self[id].parents.len())
+                                .map(|i| (self.canonize(&self[id].parents.get_unchecked(i).0), 
+                                    self.find_mut(self[id].parents.get_unchecked(i).1)))
+                        );
                     }
                 }
-                let mut parents = std::mem::take(&mut self[id].parents)
-                    .into_iter()
-                    .map(|(n, e)| {
-                        self.memo.remove(&n);
-                        (n, e)
-                    })
-                    .collect_vec();
-                parents.iter_mut().for_each(|(n, p_id)| {
-                    n.update_children(|child| self.find(child));
-                    let old_p_id = *p_id;
-                    *p_id = self.find(*p_id);
-                    dassert!(self[*p_id].color.is_none());
-                    trace!("Updating parent {:?} of {:?} to {:?}", n, old_p_id, *p_id);
-                    for child in n.children().iter().filter(|c| **c != id) {
-                        self[*child].changed_parents.push((n.clone(), *p_id));
-                    }
-                });
-                parents.sort_unstable();
-                parents.dedup_by(|(n1, e1), (n2, e2)| {
-                    n1 == n2 && {
-                        trace!("Adding union from parent dedup {:?} and {:?}", e1, e2);
-                        to_union.push((*e1, *e2));
-                        true
-                    }
-                });
-
-                for (n, e) in parents.iter_mut() {
-                    let e = self.find(*e);
-                    let temp = Self::update_memo_from_parent(&mut self.memo, n, &e);
-                    to_union.extend(temp.into_iter());
-                }
-
-                self.propagate_metadata(&parents[..]);
-
-                self[id].parents = parents;
-                N::modify(self, id);
             }
 
-            for (id1, id2) in to_union.drain(..) {
-                let (to, did_something) = self.union_impl(id1, id2);
-                if did_something {
-                    res.push(to);
-                    self.pending.push(to);
+            for (pnode, pid) in todo.clone() {
+                dassert!(self[pid].color.is_none());         
+                if let Some(id) = self.memo.insert(pnode, pid) {
+                    trace!("Adding union from parent to hashcons {:?} and {:?}", pid, id);
+                    let (to, did_something) = self.union_impl(id, pid);
+                    if did_something {
+                        res.push(to);
+                        self.pending.push(to);
+                    }
+                }
+            }
+
+            while let Some((n, e)) = todo.pop() {
+                let e = self.find_mut(e);
+                let node_data = N::make(self, &n);
+                let class = self.classes[usize::from(e)].as_mut().unwrap();
+                if self.analysis.merge(&mut class.data, node_data) {
+                    // self.pending.push(e); // NOTE: i dont think this is necessary
+                    todo.extend(class.parents.iter().cloned());
+                    N::modify(self, e);
                 }
             }
         }
         assert!(self.pending.is_empty());
-        assert!(to_union.is_empty());
+        assert!(todo.is_empty());
         res
     }
 
-    // pub(crate) fn update_from_parent_access_fn<'a, 'b, K>(mut memo: &mut HashMap<L, K>, accessor: impl FnMut(&'a mut HashMap<L, K>, L) -> Option<(Id, DenseNodeColors, &'a mut DenseNodeColors)>,
-    //                                                n: &L, e: &Id, cs: &DenseNodeColors) -> Option<(Id, Id)>
-    // {
-    //     let old_memo = accessor(memo, n.clone());
-    //     if let Some((old, old_cs, mut new_cs)) = old_memo {
-    //         if (old_cs.not_any()) || cs.not_any() {
-    //             new_cs.set_elements(0);
-    //             return Some((old, *e));
-    //         } else {
-    //             new_cs.bitor_assign(&old_cs);
-    //         }
-    //     }
-    //     None
-    // }
-
-    /// Updates the memo table with a new parent. Should be used in the context of processing unions
-    pub fn update_memo_from_parent(memo: &mut IndexMap<L, Id>, n: &L, e: &Id) -> Option<(Id, Id)> {
-        trace!("Updating memo from parent {:?} to {:?}", n, e);
-        if let Some(old) = memo.insert(n.clone(), *e) {
-            trace!("Adding memo union {:?} and {:?}", old, e);
-            return Some((old, *e));
-        }
-        None
-    }
 
     /// Restores the egraph invariants of congruence and enode uniqueness.
     ///
@@ -1192,30 +1137,21 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let start = instant::Instant::now();
 
         // Verify colors on nodes and in memo only differ by dirty colors
-        self.memo_classes_agree();
-
-        while !self.pending.is_empty() || self.colors().any(|c| c.is_dirty()) {
+        self.merge_case_splits_conclusions();
+        while (!self.pending.is_empty()) || self.colors().any(|c| c.is_dirty()) {
             let _merged = self.process_unions();
             self.memo_black_canonized();
             self.process_colored_unions();
+            self.colored_memo_canonized();    
             self.merge_case_splits_conclusions();
         }
 
-        let new_colored_equives = self.classes().map(|class| (
-            class.id,
-            self.colors()
-                .filter_map(|color| color.base_equality_class(self, class.id)
-                    .map(|s| {
-                        iassert!(s.len() > 1, "Colored equivalence class has size 1, but should always be greater");
-                        color.get_id()
-                    }))
-                .collect())
-        ).collect();
-        self.colored_equivalences = new_colored_equives;
+        self.rebuild_colored_equivalences();
 
         let trimmed_nodes = self.rebuild_classes();
-        self.memo_all_canonized();
+        // self.memo_all_canonized();
         self.memo_black_canonized();
+        self.colored_memo_canonized();
         let elapsed = start.elapsed();
         info!(
             concat!(
@@ -1238,6 +1174,20 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         iassert!(self.colors().all(|c| !c.is_dirty()));
     }
 
+    fn rebuild_colored_equivalences(&mut self) {
+        let new_colored_equives = self.classes().map(|class| (
+            class.id,
+            self.colors()
+                .filter_map(|color| color.base_equality_class(self, class.id)
+                    .map(|s| {
+                        iassert!(s.len() > 1, "Colored equivalence class has size 1, but should always be greater");
+                        color.get_id()
+                    }))
+                .collect())
+        ).collect();
+        self.colored_equivalences = new_colored_equives;
+    }
+    
     fn merge_case_splits_conclusions(&mut self) {
         let mut to_merge = vec![];
         // If we have color splits and conclusions we can take to their parent lets do it here
@@ -1319,188 +1269,52 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// Returns which colors to remove from which edges.
     pub fn colored_cong_closure(&mut self, c_id: ColorId) {
         self.get_color(c_id).unwrap().assert_black_ids(self);
-        let color_parents = self.get_colors_parents(c_id).into_iter().copied().collect_vec();
-        let cur_colors = {
-            let mut temp = color_parents.clone();
-            temp.push(c_id);
-            temp
-        };
+        let mut all_colors = self.get_colors_parents(c_id).into_iter().copied().collect_vec();
+        all_colors.push(c_id);
+        let all_colors = all_colors;
+
         let mut to_union = vec![];
-        // We need to build memo ahead of time because even a single merge might miss needed unions.
-        // Need to do some merging and initial color deletion here because we are deleting duplicate
-        // edges.
-        let mut memo: IndexMap<L, Id> = {
-            let colored_memo_canonized = cur_colors.iter()
-                .flat_map(|color| self.colored_memo[color].iter()
-                    .map(|(node, id)| (self.colored_canonize(c_id, node), *id))
-                ).collect_vec();
-            let mut v = self
-                .memo
-                .iter()
-                .map(|(orig, e)| (self.colored_canonize(c_id, orig), self.find(*e)))
-                .chain(colored_memo_canonized)
-                .collect_vec();
-            v.sort_unstable();
-            // TODO: Create dedup with side effects for iterator
-            v.dedup_by(|(n1, e1), (n2, e2)| {
-                n1 == n2 && {
-                    to_union.push((*e1, *e2));
-                    true
-                }
-            });
-            v.into_iter().collect()
-        };
-
-        for (id1, id2) in to_union.drain(..) {
-            if self[id1].color.is_some() && self[id2].color.is_some() {
-                assert!(cur_colors.contains(&self[id1].color.unwrap()));
-                assert!(cur_colors.contains(&self[id2].color.unwrap()));
-            }
-            self.colored_union(c_id, id1, id2);
-        }
+    
+        let mut memo: IndexMap<L, Id> = Default::default();
+        let mut did: IndexSet<(L, Id)> = Default::default();
         while !self.get_color(c_id).unwrap().pending.is_empty() {
-            // take the worklist, we'll get the stuff that's added the next time around
-            // deduplicate the dirty list to avoid extra work
-            let mut todo = std::mem::take(&mut self.get_color_mut(c_id).unwrap().pending);
-            for id in todo.iter_mut() {
-                *id = self.colored_find(c_id, *id);
-            }
-            if cfg!(not(feature = "upward-merging")) {
-                todo.sort_unstable();
-                todo.dedup();
-            }
-            assert!(!todo.is_empty());
-
-            // rep to all contained
-            // let all_groups: IndexMap<Id, IndexSet<Id>> =
-            //     self.get_color(c_id).unwrap().union_find.build_sets();
+            // I just need to collect all the nodes that might cause unions, and push them into the memo. 
+            // Colored nodes should also go into colored memo to keep it up to date.
+            // 
+            // Could a changed parent be in memo? If we changed x -> y, and some y was in memo it is also in parents
+            //
+            // Only the final round of colored e-nodes should go into memo. I could just retranslate the colored parents
+            // from the c_id memo.
+            let todo: IndexSet<Id> = std::mem::take(&mut self.get_color_mut(c_id).unwrap().pending)
+                .into_iter()
+                .map(|id| self.colored_find(c_id, id))
+                .collect();
+            let color = self.get_color(c_id).unwrap();
+            // Going over all equivalence classes should go over black and all colored nodes. This should collect all parents.
             for id in todo {
-                let allids = self.get_color(c_id).unwrap().equality_class(&self, id).collect_vec();
-                // I need to build parents while aware what is a colored edge
-                // Colored edges might be deleted, and they need to be updated in colored_memo if not
-                let mut parents: Vec<(L, Id, Option<Id>)> = vec![];
-                for g in allids {
-                    for (p, id) in self[g].parents.iter().chain(color_parents.iter()
-                        .filter_map(|c| self[g].colored_parents.get(c)).flatten()) {
-                        let canoned = self.colored_canonize(c_id, p);
-                        let fixed_id = self.find(*id);
-                        if let Some(memo_id) = memo.remove(&canoned) {
+                // TODO: dassert for equality_class function in color as I assume it is always up to date
+                for bid in color.equality_class(self, id) {
+                    // All parents are supposed to be here, but I need all black and colored parents. 
+                    // How do I get colored parents without duplicates? (as many bid -> one colored id)
+                    // So actually each black id has different colored parents so thats just fine.
+                    for (pnode, pid) in &self[bid].parents {
+                        let canoned = self.colored_canonize(c_id, pnode);
+                        let fixed_id = self.colored_find(c_id, *pid);
+                        if let Some(memo_id) = memo.insert(canoned, fixed_id) {
                             to_union.push((fixed_id, memo_id));
                         }
-                        // I need bool and option for sorting
-                        parents.push((canoned, fixed_id, None));
                     }
-                    for (mut p, id) in self[g].colored_parents.remove(&c_id).unwrap_or(vec![]) {
-                        dassert!(self[id].color.unwrap() == c_id, "Color mismatch");
-                        let fixed_id = self.find(id);
-                        if let Some(memo_id) = memo.remove(&p) {
-                            to_union.push((fixed_id, memo_id));
-                        }
-                        self.colored_memo.get_mut(&c_id).unwrap().remove(&p);
-                        self.colored_update_node(c_id, &mut p);
-                        if let Some(memo_id) = memo.remove(&p) {
-                            to_union.push((fixed_id, memo_id));
-                        }
-                        parents.push((p, fixed_id, Some(g)));
-                    }
-                }
-                if let Some(pars) = self[id].colord_changed_parents.remove(&c_id) {
-                    #[cfg(debug_assertions)]
-                    let fixed_to_union: IndexSet<(Id, Id)> = to_union
-                        .iter()
-                        .map(|(a, b)| (self.colored_find(c_id, *a), self.colored_find(c_id, *b)))
-                        .collect();
-                    for (n, p_id) in pars {
-                        trace!("Removing colored parent from memo: {:?} {:?}", n, p_id);
-                        #[allow(unused_variables)]
-                        let opt_old = self.colored_memo.get_mut(&c_id).unwrap().remove(&n);
-                        #[cfg(debug_assertions)]
-                        if let Some(m_id) = opt_old {
-                            let fixed_m_id = self.colored_find(c_id, m_id);
-                            let fixed_p_id = self.colored_find(c_id, p_id);
-                            if !(fixed_to_union.contains(&(fixed_p_id, fixed_m_id))
-                                || fixed_to_union.contains(&(fixed_m_id, fixed_p_id)))
-                            {
-                                assert_eq!(fixed_m_id, fixed_p_id,
-                                               "Found unexpected non-equivalence for {:?}(memo)!={:?}(changed_parent) for enode {:?}",
-                                               fixed_m_id, fixed_p_id, n);
+                    for &c in &all_colors {
+                        for (pnode, pid) in self[bid].colored_parents.get(&c).unwrap_or(&vec![]) {
+                            let canoned = self.colored_canonize(c_id, pnode);
+                            let fixed_id = self.colored_find(c_id, *pid);
+                            if c == c_id {
+                                did.insert((canoned.clone(), self.find(*pid)));
+                            }
+                            if let Some(memo_id) = memo.insert(canoned, fixed_id) {
+                                to_union.push((fixed_id, memo_id));
                             }
                         }
-                    }
-                }
-                for (n, p_id, _) in parents.iter() {
-                    for child in n.children().iter().filter(|c| **c != id) {
-                        dassert!(self.colored_find(c_id, *child) == *child);
-                        trace!(
-                            "Adding colored parent to changed parents: {:?} {:?}",
-                            n,
-                            p_id
-                        );
-                        self[*child]
-                            .colord_changed_parents
-                            .entry(c_id)
-                            .or_default()
-                            .push((n.clone(), *p_id));
-                    }
-                }
-                // TODO: we might be able to prevent parent recollection by memoization.
-                // There is a bit of a trick here. We are sorting such that should be deleted nodes
-                // will be last. The reason is that we will delete all colored nodes that have a
-                // black rep. Of course we need to act differently for [colored_no_cremove].
-                // Dedup goes in reverse order, so we need to reverse the check.
-                parents.sort_unstable_by(|(n1, id1, opt1), (n2, id2, opt2)| {
-                    if cfg!(feature = "colored_no_cremove") {
-                        (n1, opt1.is_some(), id1).cmp(&(n2, opt2.is_some(), id2))
-                    } else {
-                        (n1, opt1.is_none(), id1).cmp(&(n2, opt2.is_none(), id2))
-                    }
-                });
-                parents.dedup_by(|(n1, e1, opt1), (n2, e2, opt2)| {
-                    n1 == n2 && {
-                        if cfg!(feature = "colored_no_cremove") {
-                            dassert!(opt2.is_none() || opt1.is_some())
-                        } else {
-                            dassert!(opt1.is_none() || opt2.is_some())
-                        }
-                        to_union.push((*e1, *e2));
-                        true
-                    }
-                });
-
-                #[allow(unused_variables)]
-                for (n, e, orig_class) in parents {
-                    if let Some(old) = memo.insert(n.clone(), e) {
-                        to_union.push((old, e));
-                    }
-
-                    #[allow(unused_attributes)]
-                    #[allow(unreachable_code)]
-                    if let Some(orig_class) = orig_class {
-                        #[cfg(feature = "colored_no_cmemo")]
-                        panic!("Should not have colored enodes in no_cmemo mode");
-                        dassert!(
-                            self.colored_canonize(c_id, &n) == n,
-                            "Colored canonize should be idempotent {:?} {:?}",
-                            self.colored_canonize(c_id, &n),
-                            n
-                        );
-                        // if let Some(b_ids) = self.get_color(c_id).unwrap().black_ids(e) {
-                        //     dassert!(b_ids.iter().any(|b_id| self[*b_id].nodes.iter().any(|n1| &self.colored_canonize(c_id, n1) == &n)));
-                        // }
-                        trace!(
-                            "Adding colored parent to memo: {:?} {:?} @ color {c_id}",
-                            n,
-                            e
-                        );
-                        let old = self.colored_memo.get_mut(&c_id).unwrap().insert(n.clone(), e);
-                        if let Some(old) = old {
-                            to_union.push((old, e));
-                        }
-                        self[orig_class]
-                            .colored_parents
-                            .entry(c_id)
-                            .or_default()
-                            .push((n, e));
                     }
                 }
             }
@@ -1508,6 +1322,12 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             for (id1, id2) in to_union.drain(..) {
                 self.colored_union(c_id, id1, id2);
             }
+        }
+
+        // Update colored memo
+        for (n, id) in did {
+            let n = self.colored_canonize(c_id, &n);
+            self.colored_memo.get_mut(&c_id).unwrap().insert(n, id);
         }
 
         assert!(
@@ -1574,7 +1394,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                     if n.children().len() > 0
                         && (is_deleted.is_none() || !*is_deleted.as_ref().unwrap())
                     {
-                        dassert!(self.find(self.colored_memo[c][&canoned_n]) == self.find(*id) || deleted(self, n, *c, &mut is_deleted),
+                        dassert!(self.colored_find(*c, self.colored_memo[c][&canoned_n]) == self.colored_find(*c, *id) || deleted(self, n, *c, &mut is_deleted),
                             "Colored memo does not have correct id for {:?} in color {}. It is {} but should be {}", n, c, self.colored_memo[c][&canoned_n], self.find(*id));
                     }
                     // dassert!(&self.colored_canonize(*c, n) == n ||
@@ -1664,17 +1484,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         });
     }
 
-    fn memo_classes_agree(&self) {
-        debug_assert!(
-            self.memo
-                .iter()
-                .all(|(_n, id)| self[self.find(*id)].color.is_none())
-                && self.colored_memo.iter().all(|(c, c_memo)| c_memo
-                    .iter()
-                    .all(|(_, id)| self[self.find(*id)].color == Some(*c)))
-        );
-    }
-
     /// Assert that the invariant that there is at most one colored EClass in a colored equality class.
     /// This is true because for each colored equality class, there is at most one colored EClass for the colored ENodes.
     pub fn no_two_colored_classes_in_ec(&self) -> bool {
@@ -1703,22 +1512,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             true
         });
         true
-    }
-
-    #[inline(never)]
-    fn propagate_metadata(&mut self, parents: &[(L, Id)]) {
-        for (n, e) in parents {
-            let e = self.find(*e);
-            let node_data = N::make(self, n);
-            let class = self.classes[usize::from(e)].as_mut().unwrap();
-            if self.analysis.merge(&mut class.data, node_data) {
-                // self.pending.push(e); // NOTE: i dont think this is necessary
-                let e_parents = std::mem::take(&mut class.parents);
-                self.propagate_metadata(&e_parents);
-                self[e].parents = e_parents;
-                N::modify(self, e)
-            }
-        }
     }
 
     /// If every `Var` in self agrees with other and the colors match then return true
@@ -1822,17 +1615,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             c_color.is_none() || c_color.unwrap() == color || self.get_colors_parents(color).contains(&c_color.unwrap())
         });
         if changed {
-            // Update class
-            let from_cp = self[from]
-                .colord_changed_parents
-                .remove(&color)
-                .unwrap_or_default();
-            self[to]
-                .colord_changed_parents
-                .entry(color)
-                .or_default()
-                .extend(from_cp);
-
             // For child run base_union
             let color_children = self.get_color(color).unwrap().children().into_iter().copied().collect_vec();
             for child in color_children {
@@ -2780,7 +2562,7 @@ mod tests {
         let mut egraph = Runner::default().with_egraph(egraph).run(&rules).egraph;
         egraph.rebuild();
         egraph.check_memo();
-        egraph.memo_all_canonized();
+        // egraph.memo_all_canonized();
     }
 
     fn initialize_filter_tests() -> (

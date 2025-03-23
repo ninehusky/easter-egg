@@ -17,13 +17,11 @@ pub struct EClass<L, D> {
     /// The analysis data associated with this eclass.
     pub data: D,
     pub(crate) parents: Vec<(L, Id)>,
-    pub(crate) changed_parents: Vec<(L, Id)>,
 
     /// Each EClass has a unique color (None is black, i.e. default).
     pub(crate) color: Option<ColorId>,
     /// Colored parents are colored_canonized pointing to the black ID of the class.
     pub(crate) colored_parents: IndexMap<ColorId, Vec<(L, Id)>>,
-    pub(crate) colord_changed_parents: IndexMap<ColorId, Vec<(L, Id)>>,
 }
 
 impl<L, D> EClass<L, D> {
