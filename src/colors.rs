@@ -1,5 +1,4 @@
-use std::collections::BTreeSet;
-use crate::SimpleUnionFind;
+use crate::{egraph, SimpleUnionFind};
 pub use crate::{Id, EGraph, Language, Analysis, ColorId};
 use crate::{unionfind::UnionFind, Singleton};
 use crate::util::JoinDisp;
@@ -12,6 +11,16 @@ use crate::unionfind::UnionFindWrapper;
 
 pub const BLACK_COLOR: ColorId = ColorId(0);
 
+/// Represents an e-graph layer that implements its own congruence relation.
+/// 
+/// Each color represents a distinct congruence relation within the e-graph layers.
+/// The ids in the union find are directly taken from its parent layer.
+/// For efficiency, the color maintains the parent’s equality class for an id,
+/// speeding up search and rebuild operations.
+/// 
+/// Currently, ids are not removed from the union find, which is wasteful but simpler.
+/// An optimization could remove an id when it is merged in the parent, eliminating
+/// redundancy; however, that would require updating all child colors to point to the new representative.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color<L: Language, N: Analysis<L>> {
@@ -25,7 +34,6 @@ pub struct Color<L: Language, N: Analysis<L>> {
     union_find: Box<dyn UnionFind<Id>>,
     /// Used to determine for each a colored equality class what is the black colored class.
     /// Relevant when a colored edge was added.
-    pub(crate) black_colored_classes: IndexMap<Id, Id>,
     pub(crate) children: Vec<ColorId>,
     pub(crate) parent: Option<ColorId>,
     parents: Vec<ColorId>,
@@ -61,7 +69,6 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
             pending: Default::default(),
             equality_classes: Default::default(),
             union_find,
-            black_colored_classes: Default::default(),
             children: vec![],
             parent,
             parents,
@@ -97,151 +104,114 @@ impl<L: Language, N: Analysis<L>> Color<L, N> {
         self.union_find.find(fixed)
     }
 
+    pub fn find_mut(&mut self, id: Id) -> Id {
+        self.union_find.find_mut(id)
+    }
+
     pub fn is_dirty(&self) -> bool { !self.pending.is_empty() }
 
-    /// Removes equality of `base_to` and `base_from` in the color.
-    /// `base_to` Should be the id of "to" (after running find in the parent)
-    /// `base_from` Should be the id of "from" (after running find in parent)
-    /// `to` Should be the id of "to" (after running find in the current color)
-    /// `from` Should be the id of "from" (after running find in the current color)
-    fn remove_equality(&mut self, base_to: Id, base_from: Id, to: Id, from: Id) {
-        // If to != from then the underlying assumption is that black_to != black_from
-        if to != from {
-            let from_ids = self.equality_classes.remove(&from).unwrap_or_else(|| IndexSet::singleton(from));
-            let to_ids = self.equality_classes.entry(to).or_insert_with(|| IndexSet::singleton(to));
-            // Remove everything that is no longer a representative
-            // to_ids.retain(|id| !from_ids.contains(id));
-            // Actually only one is no longer a rep
-            to_ids.extend(from_ids);
-            to_ids.remove(&base_from);
-            // Remove the old from (no longer a representative)
-            // self.equality_classes.entry(to).and_modify(|s| { s.remove(&black_from); });
-            // Actually should have been in from_ids
-            assert!(!to_ids.contains(&base_from));
-        } else if base_to != base_from {
-            // We have to remove someone (because something was merged in black).
-            // In this case `black_from` =_c `black_to` as they are merged in the color (`to` == `from`).
-            // Black from is no longer a rep so remove it.
-            self.equality_classes.entry(to).and_modify(|s| { s.remove(&base_from); });
-        }
-        if self.equality_classes.get(&to).map_or(false, |s| s.len() == 1) {
-            dassert!(self.equality_classes.get(&to).unwrap().contains(&to), "We should always have the representative in the map");
-            self.equality_classes.remove(&to);
-        }
-    }
 
-    // Assumed id1 and id2 are canonized to the colors ids
-    fn update_black_classes(&mut self, to: Id, from: Id) -> Option<(Id, Id)> {
-        let mut g_todo = None;
-        if to != from {
-            if let Some(colored_from) = self.black_colored_classes.remove(&from) {
-                let old_to = self.black_colored_classes.insert(to, colored_from);
-                if let Some(colored_to) = old_to {
-                    if colored_to < colored_from {
-                        self.black_colored_classes.insert(to, colored_to);
-                    }
-                    g_todo = Some((colored_to, colored_from));
-                }
-            }
-        }
-        if to != from && cfg!(feature = "upward-merging") {
-            unimplemented!("Upward merging not supported for colored graph");
-            // self.process_unions();
-        }
-        g_todo
-    }
-
-    // Assumes to and from canonised to the base (parent, black or colored) and !=
-    pub(crate) fn inner_base_union(&mut self, egraph: &mut EGraph<L, N>, base_to: Id, base_from: Id) -> Vec<(Id, Id)> {
+    /// Update the color according to the union of base_to and base_from in the parent layer
+    /// Assumes to and from canonised to the base (parent, black or colored) and !=
+    /// @returns whether children need an update as well
+    pub(crate) fn inner_base_union(&mut self, base_to: Id, base_from: Id) -> bool {
+        // I should update the uf and the equality classes.
+        // This should recursively try to update children until hitting a case they were both in UF and equal?
+        //  1. If both were present but not equal I definitly need to union them, then I potentially need to remove from
+        //  2. If both were present and equal I potentially need to remove from. This is a special case, no need to 
+        //          recurse as any future child will see to and from as the same.
+        //  3. Any of them was missing. I think if from was missing I need to change to new rep? Does it matter? 
+        //          Not really, I just need to not assume I am holding parent rep
+        dassert!(base_to != base_from, "Should not be the same");
         let uf: &mut UnionFindWrapper<Id> = self.union_find.as_mut().downcast_mut().unwrap();
         let from_existed = uf.contains(&base_from);
         let to_existed = uf.contains(&base_to);
-        let orig_to = uf.find(base_to);
-        let orig_from = uf.find(base_from);
 
-        let (colored_to, colored_from) = if to_existed || from_existed {
+        let diff = if to_existed && from_existed {
             // This part only needs to happen if one of the two is in the union find.
-            uf.union(orig_to, orig_from)
+            let (colored_to, colored_from) =  self.inner_colored_union(base_to, base_from);
+            self.equality_classes.entry(colored_to).and_modify(|s| { 
+                s.swap_remove(&base_from); 
+            });
+            if self.equality_classes.get(&colored_to).map_or(false, |s| s.len() == 1) {
+                dassert!(self.equality_classes.get(&colored_to).unwrap().contains(&colored_to), 
+                    "We should always have the representative in the map");
+                self.equality_classes.swap_remove(&colored_to);
+            }
+            colored_to != colored_from
+        } else if from_existed {
+            // If from existed, we need to update the to to be the new representative.
+            let colored_from = self.find_mut(base_from);
+            dassert!(base_to != colored_from, 
+                    "Ids in colored union should not be the same if from existed and to didnt");
+            let uf: &mut UnionFindWrapper<Id> = self.union_find.as_mut().downcast_mut().unwrap();
+            uf.swap(base_from, base_to);
+            self.equality_classes.entry(colored_from).and_modify(|s| { 
+                s.swap_remove(&base_from); 
+                s.insert(base_to);
+            });
+            self.pending.push(base_to);
+            true
         } else {
-            (base_to, base_from)
+            // TODO: I don't need to do anything here, right?
+            let to = self.find_mut(base_to);
+            dassert!(to != base_from, 
+                "Ids in colored union should not be the same if to existed and from didnt");
+            self.pending.push(to);
+            true
         };
 
-        // We need to update equalities.
-        self.remove_equality(base_to, base_from, colored_to, colored_from);
-
-        let uf: &mut UnionFindWrapper<Id> = self.union_find.as_mut().downcast_mut().unwrap();
-
-        // In case both were not colored union_find.remove will not have any effect which is good.
-        if colored_to != colored_from {
-            if from_existed {
-                // Only need to update children in "this" union find.
-                uf.remove(&base_from);
-            }
-            self.pending.push(colored_to);
-
-            // If both color classes existed it will update colored enodes classes.
-            let mut todo_res = {
-                let opt = self.update_black_classes(colored_to, colored_from);
-                if let Some((id1, id2)) = opt {
-                    vec![(id1, id2)]
-                } else {
-                    vec![]
-                }
-            };
-
-            for c in self.children() {
-                todo_res.extend(egraph.inner_base_union(*c, colored_to, colored_from).into_iter());
-            }
-
-            return todo_res;
-        }
-
-        return Default::default();
+        diff
     }
 
     // Assumed id1 and id2 are parent canonized
-    pub(crate) fn inner_colored_union(&mut self, id1: Id, id2: Id) -> (Id, Id, bool, Vec<(Id, Id)>) {
+    #[inline(always)]
+    pub(crate) fn inner_colored_union(&mut self, id1: Id, id2: Id) -> (Id, Id) {
         // Parent classes will be updated in black union to come.
         let (to, from) = self.union_find.union(id1, id2);
         let changed = to != from;
-        let g_todo = self.update_black_classes(to, from).into_iter().collect_vec();
         if changed {
             self.pending.push(to);
-            let from_ids = self.equality_classes.remove(&from).unwrap_or_else(|| IndexSet::singleton(from));
+            let from_ids = self.equality_classes.swap_remove(&from).unwrap_or_else(|| IndexSet::singleton(from));
             self.equality_classes.entry(to).or_insert_with(|| IndexSet::singleton(to)).extend(from_ids);
         }
-        (to, from, changed, g_todo)
+        (to, from)
     }
 
     pub fn base_equality_class(&self, egraph: &EGraph<L, N>, id: Id) -> Option<&IndexSet<Id>> {
         self.equality_classes.get(&self.find(egraph, id))
     }
 
-    pub fn equality_class(&self, egraph: &EGraph<L, N>, id: Id) -> Box<dyn Iterator<Item = Id>> {
+    pub fn equality_class<'a>(&'a self, egraph: &'a EGraph<L, N>, id: Id) -> Box<dyn Iterator<Item = Id> + 'a> {
         let parent = self.parent();
         let fixed_id = self.find(egraph, id);
-        let single = BTreeSet::singleton(fixed_id);
-        let res = if let Some(ids) = self.equality_classes.get(&fixed_id) {
+        let mut res: Box<dyn Iterator<Item = Id>> = if let Some(ids) = self.equality_classes.get(&fixed_id) {
             if let Some(c_id) = parent {
-                ids.into_iter().copied().flat_map(|id| egraph.get_color(c_id).unwrap().equality_class(egraph, id)).collect_vec()
+                Box::new(ids.into_iter().copied()
+                    .flat_map(move |id| egraph.get_color(c_id).unwrap().equality_class(egraph, id)))
             } else {
-                ids.into_iter().copied().collect_vec()
+                Box::new(ids.into_iter().copied())
             }
         } else {
-            single.into_iter().collect_vec()
+            if let Some(c_id) = parent {
+                Box::new(egraph.get_color(c_id).unwrap().equality_class(egraph, id))
+            } else {
+                Box::new(std::iter::once(id))
+            }
         };
-        dassert!(res.len() == res.iter().unique().count());
-        Box::new(res.into_iter())
+        dassert!({
+            let temp = res.collect_vec();
+            let r = temp.len() == temp.iter().unique().count();
+            res = Box::new(temp.into_iter());
+            r
+        });
+        res
     }
 
     /// Returns the black representative of the colored e-class of the current color only. Does not
     /// include the parents equality classes.
     pub fn current_black_reps(&self) -> impl Iterator<Item=&Id> {
         self.equality_classes.keys().into_iter()
-    }
-
-    pub fn black_colored_classes_size(&self) -> usize {
-        self.black_colored_classes.len()
     }
 
     pub fn parent(&self) -> Option<ColorId> { self.parent }

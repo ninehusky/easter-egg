@@ -8,7 +8,7 @@ use invariants::{dassert, iassert, tassert, wassert, AssertConfig, AssertLevel};
 use log::*;
 use std::rc::Rc;
 
-use crate::{colors::BLACK_COLOR, unionfind::{MutUnionFind, UnionFind}, Analysis, MultiPattern};
+use crate::{colors::BLACK_COLOR, unionfind::UnionFind, Analysis, MultiPattern};
 use crate::AstSize;
 use crate::Dot;
 use crate::EClass;
@@ -229,6 +229,20 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     pub(crate) fn verify_colored_uf_minimal(&self) {
         for color in self.colors() {
             color.verify_uf_minimal(self);
+        }
+    }
+    
+    fn merge_colored_eclasses(&mut self) {
+        let mut mapping  = IndexMap::new();
+        for c in self.classes() {
+            if let Some(color) = c.color() {
+                mapping.entry((color, self.colored_find(color, c.id))).or_insert_with(|| vec![]).push(c.id);
+            }
+        }
+        for (_color, eclasses) in mapping {
+            for i in 1..eclasses.len() {
+                self.union(eclasses[0], eclasses[i]);
+            }
         }
     }
 }
@@ -648,7 +662,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn union_impl(&mut self, id1: Id, id2: Id) -> (Id, bool) {
         fn concat<T>(to: &mut Vec<T>, mut from: Vec<T>) {
             if to.len() < from.len() {
@@ -664,33 +678,14 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         if changed {
             // An unsafe hack that is fine because we only use the union find of the egraph in inner
             // black union:
-            let colors = self.base_colors.clone();
-            let todo = colors.into_iter()
-                .flat_map(|color| self.inner_base_union(color, to, from))
-                .collect_vec();
-            for (id1, id2) in todo {
-                self.union(id1, id2);
-            }
+            self.base_colors.iter().copied().collect_vec().into_iter()
+                .for_each(|color| self.inner_base_union(color, to, from));
 
             #[cfg(feature = "colored_no_cmemo")]
             iassert!(self[to].color().is_none());
             #[cfg(feature = "colored_no_cmemo")]
             iassert!(self[from].color().is_none());
-            if let Some(c) = self[to].color {
-                iassert!(self[from].color == self[to].color);
-                iassert!(self.colored_find(c, to) == self.colored_find(c, from));
-                let colored_to = self.colored_find(c, to);
-                let old = self
-                    .get_color_mut(c)
-                    .unwrap()
-                    .black_colored_classes
-                    .insert(colored_to, to);
-                if let Some(o) = old {
-                    self.union(o, to);
-                }
-            } else {
-                self.pending.push(to);
-            }
+            self.pending.push(to);
 
             // update the classes data structure
             let from_class = self.classes[usize::from(from)].take().unwrap();
@@ -732,16 +727,15 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         EGraphDump(self)
     }
 
-    pub(crate) fn inner_base_union(&mut self, color_id: ColorId, to: Id, from: Id) -> Vec<(Id, Id)> {
-        let color_ptr = self.colors.get_mut(color_id.0).unwrap();
-        let color_opt = std::mem::take(color_ptr);
-        if color_opt.is_none() {
-            return vec![];
+    #[inline(always)]
+    pub(crate) fn inner_base_union(&mut self, color_id: ColorId, to: Id, from: Id) {
+        let mut stack = vec![color_id];
+        // Update all children e-graphs (colors) that the union happened
+        while let Some(color_id) = stack.pop() {
+            if self.get_color_mut(color_id).unwrap().inner_base_union(to, from) {
+                stack.extend(self.get_color(color_id).unwrap().children().iter().copied().map(|c| c));
+            }
         }
-        let mut color = color_opt.unwrap();
-        let res = color.inner_base_union(self, to, from);
-        self.colors[color_id.0] = Some(color);
-        res
     }
 
     /// Performs the union between two egraphs.
@@ -824,10 +818,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             id
         } else {
             let id = self.inner_create_class(&mut enode, Some(color));
-            self.get_color_mut(color)
-                .unwrap()
-                .black_colored_classes
-                .insert(id, id);
             enode.children().iter().copied().unique().for_each(|child| {
                 self[child]
                     .colored_parents
@@ -1138,12 +1128,14 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         // Verify colors on nodes and in memo only differ by dirty colors
         self.merge_case_splits_conclusions();
+        self.merge_colored_eclasses();
         while (!self.pending.is_empty()) || self.colors().any(|c| c.is_dirty()) {
             let _merged = self.process_unions();
             self.memo_black_canonized();
             self.process_colored_unions();
             self.colored_memo_canonized();    
             self.merge_case_splits_conclusions();
+            self.merge_colored_eclasses();
         }
 
         self.rebuild_colored_equivalences();
@@ -1195,7 +1187,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             // Check they all have the same parent
             assert_eq!(cs.iter().map(|c| self.get_colors_parents(*c)[0]).collect::<IndexSet<ColorId>>().len(), 1);
             assert!(cs.len() > 1);
-            let cparent = self.get_colors_parents(cs[0]);
+            let cparents = self.get_colors_parents(cs[0]);
             // Get all their "extra" equivalences
             let mut grouped: IndexMap<Vec<Id>, IndexSet<Id>> = Default::default();
             for (id, group) in &self.get_color(cs[0]).unwrap().equality_classes {
@@ -1203,7 +1195,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 // Need to only check parent color classes
                 let group = group.iter()
                     .filter(|id| self[**id].color.is_none() ||
-                        cparent.contains(&self[**id].color().unwrap()))
+                        cparents.contains(&self[**id].color().unwrap()))
                     .copied().collect();
                 grouped.insert(vec![*id], group);
             }
@@ -1228,7 +1220,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 }
                 grouped = new_grouped;
             }
-            let cparent = cparent.last().copied();
+            let cparent = cparents.last().copied();
             // Now we have all the groups, we can merge them
             for (_, group) in grouped {
                 let first = group.first().unwrap();
@@ -1561,17 +1553,19 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Do not use yet
     pub fn delete_color(&mut self, c_id: ColorId) {
+        unimplemented!("This function is not yet implemented");
         assert!(self.is_clean());
         // TODO: Remove from parents and children
         let color = std::mem::replace(&mut self.colors[c_id.0], None).unwrap();
-        for (_colored, black) in color.black_colored_classes {
-            let class = std::mem::replace(&mut self.classes[black.0 as usize], None).unwrap();
-            for n in &class.nodes {
-                self.classes_by_op
-                    .get_mut(&n.op_id())
-                    .map(|x| x.remove(&class.id));
-            }
-        }
+        // TODO: remove tagged classes?
+        // for (_colored, black) in color.black_colored_classes {
+        //     let class = std::mem::replace(&mut self.classes[black.0 as usize], None).unwrap();
+        //     for n in &class.nodes {
+        //         self.classes_by_op
+        //             .get_mut(&n.op_id())
+        //             .map(|x| x.remove(&class.id));
+        //     }
+        // }
         color.equality_classes.iter().for_each(|(_, ids)| {
             for id in ids {
                 self.colored_equivalences[id].remove(&c_id);
@@ -1594,16 +1588,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     #[allow(missing_docs)]
     pub fn colored_union(&mut self, color: ColorId, id1: Id, id2: Id) -> (Id, bool) {
-        let (id1, id2) = (self.find(id1), self.find(id2));
-        let (fixed1, fixed2) = if let Some(p) = self.get_color(color).unwrap().parent() {
-            (self.colored_find(p, id1), self.colored_find(p, id2))
-        } else {
-            (id1, id2)
-        };
-        let (to, from, changed, mut todo) = self
-            .get_color_mut(color)
-            .unwrap()
-            .inner_colored_union(fixed1, fixed2);
+        let id1 = self.opt_colored_find_mut(self.get_color(color).unwrap().parent(), id1);
+        let id2 = self.opt_colored_find_mut(self.get_color(color).unwrap().parent(), id2);
         dassert!({
             let fixed = self.colored_find(color, id1);
             let c_color = self[fixed].color;
@@ -1614,35 +1600,35 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             let c_color = self[fixed].color;
             c_color.is_none() || c_color.unwrap() == color || self.get_colors_parents(color).contains(&c_color.unwrap())
         });
-        if changed {
+        let (to, from) = self.get_color_mut(color).unwrap().inner_colored_union(id1, id2);
+        
+        if to != from {
             // For child run base_union
             let color_children = self.get_color(color).unwrap().children().into_iter().copied().collect_vec();
             for child in color_children {
-                todo.extend(self.inner_base_union(child, to, from).into_iter());
+                self.inner_base_union(child, to, from);
             }
         }
-        for (id1, id2) in todo {
-            wassert!(
-                self[id1].color().unwrap() == self[id2].color().unwrap(),
-                "Todo returned from colored union should be two colored 'black' classes"
-            );
-            self.union(id1, id2);
-        }
-        // if changed {
-        //     for child in self.get_color(color).unwrap().children().iter().copied().collect_vec() {
-        //         // TODO: fix this. id1 and id2 might need to be translated
-        //         let child_c = self.get_color(child).unwrap();
-        //         self.colored_union(child, child_c.translate_from_base(id1), child_c.translate_from_base(id2));
-        //     }
-        // }
-        tassert!(AssertConfig::new(AssertLevel::Trace); self.classes().filter(|x| x.color().is_some())
-            .group_by(|x| (self.opt_colored_find(x.color(),  x.id), x.color().unwrap()))
-            .into_iter().all(|(_c, classes)| classes.count() == 1), "A color has two colored classes for a single Id");
-        (to, changed)
+        (to, to != from)
     }
 
     pub fn colored_find(&self, color: ColorId, id: Id) -> Id {
+        let id = self.opt_colored_find(self.get_color(color).unwrap().parent(), id);
         self.get_color(color).unwrap().find(&self, id)
+    }
+
+    pub fn colored_find_mut(&mut self, color: ColorId, id: Id) -> Id {
+        let id = self.opt_colored_find_mut( self.get_color(color).unwrap().parent(), id);
+        self.get_color_mut(color).unwrap().find_mut(id)
+    }
+
+    pub fn opt_colored_find_mut(&mut self, color: Option<ColorId>, id: Id) -> Id {
+        if let Some(color) = color {
+            let id = self.opt_colored_find_mut(self.get_color(color).unwrap().parent(), id);
+            self.colored_find_mut(color, id)
+        } else {
+            self.find_mut(id)
+        }
     }
 
     pub fn opt_colored_find(&self, color: Option<ColorId>, id: Id) -> Id {

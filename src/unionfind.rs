@@ -4,13 +4,16 @@ use as_any::AsAny;
 use bimap::BiBTreeMap;
 
 pub trait UnionFind<K: Copy + Eq> : AsAny + Debug + Send + Sync {
-
     /// Returns the number of elements in the union find.
     fn len(&self) -> usize;
 
     /// Finds the leader of the set that `current` is in.
     /// If K is not in the union find, it should return K.
     fn find(&self, current: K) -> K;
+
+    /// Finds the leader of the set that `current` is in.
+    /// This version updates the parents to compress the path.
+    fn find_mut(&mut self, current: K) -> K;
 
     /// Given two leader ids, unions the two eclasses.
     /// This should run find to compress paths for efficiency.
@@ -31,12 +34,6 @@ impl<K> Clone for Box<dyn UnionFind<K> + 'static> where
     fn clone(&self) -> Self {
         self.clone_box()
     }
-}
-
-pub trait MutUnionFind<K: Copy + std::cmp::Eq>: UnionFind<K> {
-    /// Finds the leader of the set that `current` is in.
-    /// This version updates the parents to compress the path.
-    fn find_mut(&mut self, current: K) -> K;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,9 +93,7 @@ impl<'a> UnionFind<Id> for SimpleUnionFind {
             .map(|(_, p)| *p);
         Box::new(it)
     }
-}
 
-impl MutUnionFind<Id> for SimpleUnionFind {
     fn find_mut(&mut self, mut current: Id) -> Id {
         let mut collected = vec![];
         while current != self.parent(current) {
@@ -187,9 +182,7 @@ impl<K: Copy + Ord + Debug + Send + Sync + 'static> UnionFind<K> for UnionFindWr
     fn iter(&self) -> Box<dyn Iterator<Item = K> + '_> {
         Box::new(self.trns.iter().map(|(k, _)| *k))
     }
-}
 
-impl<K: Copy + Ord + Debug + Send + Sync + 'static> MutUnionFind<K> for UnionFindWrapper<K> {
     fn find_mut(&mut self, key: K) -> K {
         let idx = self.trns.get_by_left(&key);
         match idx {
@@ -211,16 +204,25 @@ impl<K: Copy + Ord + Debug + Send + Sync + 'static> UnionFindWrapper<K> {
         self.trns.insert(key, id.0 as usize);
     }
 
+    /// Swap a key with a new key. Panics if new key already exists.
+    pub fn swap(&mut self, key: K, new_key: K) {
+        if self.trns.contains_left(&new_key) {
+            panic!("Key already exists");
+        }
+        let (_, idx) = self.trns.remove_by_left(&key).unwrap();
+        self.trns.insert(new_key, idx);
+    }
+
     /// Remove a node from the union-find. It will not remove the group, but it will remove a single node.
     /// Fails if the node is a leader.
-    pub fn remove(&mut self, t: &K) -> Option<()> {
-        let leader = self.find_mut(*t);
-        if &leader == t {
-            return None;
-        }
-        self.trns.remove_by_left(t);
-        Some(())
-    }
+    // pub fn remove(&mut self, t: &K) -> Option<()> {
+    //     let leader = self.find_mut(*t);
+    //     if &leader == t {
+    //         return None;
+    //     }
+    //     self.trns.remove_by_left(t);
+    //     Some(())
+    // }
 
     pub fn contains(&self, key: &K) -> bool {
         self.trns.contains_left(key)
