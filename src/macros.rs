@@ -101,7 +101,8 @@ impl GetOp for bool {
 
 impl GetOp for Symbol {
     fn get_op(&self) -> u32 {
-        self.0
+        let x: std::num::NonZeroU32 = (*self).into();
+        x.into()
     }
 }
 

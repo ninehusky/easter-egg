@@ -2646,7 +2646,6 @@ mod tests {
         let _id5 = egraph.union(id5, id6).0;
         let _id1 = egraph.union(id1, id3).0;
         let _id4 = egraph.union(id4, id7).0;
-        println!("All op strings: {:?}", util::get_strings());
         // {0: "id1", 1: "id3", 2: "id4", 3: "id5", 4: "id6", 5: "id7", 6: "+", 7: "-"}
         egraph.rebuild();
         egraph.dot().to_dot("test.dot").unwrap();

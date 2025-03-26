@@ -43,6 +43,7 @@ derive-new = "0.7.0"
 maplit = "1.0.2"
 derive_more = {version = "2.0", features = ["display"]}
 as-any = "0.3.2"
+symbol_table = { version = "0.4.0", features = ["global"] }
 
 [dev-dependencies]
 env_logger = {version = "0.11", default-features = false}
@@ -60,4 +61,4 @@ keep_splits = []
 parallel = ["rayon", "crossbeam", "concurrent_cufind"]
 concurrent_cufind = []
 invariants-off = ["invariants/off"]
-serde = ["smallvec/serde", "indexmap/serde", "either/serde", "bimap/serde", "ordered-float/serde"]
+serde = ["smallvec/serde", "indexmap/serde", "either/serde", "bimap/serde", "ordered-float/serde", "symbol_table/serde"]
