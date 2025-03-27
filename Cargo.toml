@@ -28,7 +28,7 @@ either = "1.9.0"
 global_counter = "0.2.1"
 bimap = "0.6.2"
 bitvec = "1.0.0"
-invariants = {path = "../rust-invariants"}
+invariants = "0.1.4"
 # for very silly reasons
 num-traits = "0.2.15"
 ordered-float = "5.0"
