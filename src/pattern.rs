@@ -377,8 +377,7 @@ impl<L: Language, A: Analysis<L>> Searcher<L, A> for Pattern<L> {
     /// Searches all equivalent EClasses under the colored assumption. Returns all results under
     /// the representative of eclass in color.
     fn colored_search_eclass_with_limit(&self, egraph: &EGraph<L, A>, eclass: Id, color: ColorId, limit: usize) -> Option<SearchMatches> {
-        let todo = egraph.get_base_equalities(Some(color), eclass)
-            .map(|x| x.collect_vec()).unwrap_or(vec![eclass]);
+        let todo = egraph.get_color(color).unwrap().equality_class(egraph, eclass);
         todo.into_iter()
             .filter_map(|id| self.program.colored_run_with_limit(egraph, id, Some(color), limit))
             .fold(None, |acc, x| 

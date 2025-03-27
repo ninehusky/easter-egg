@@ -2,7 +2,9 @@ use std::{
     borrow::BorrowMut,
     fmt::{self, Debug},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::PartialEq;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::iter::{repeat, zip};
 use indexmap::{IndexMap, IndexSet};
 use invariants::{dassert, iassert, tassert, wassert, AssertConfig, AssertLevel};
 use log::*;
@@ -211,7 +213,7 @@ pub struct EGraph<L: Language, N: Analysis<L>> {
     /// Colors with "no" parents are children of main UF (i.e. black) and are tracked here.
     base_colors: Vec<ColorId>,
     pub(crate) colored_memo: BTreeMap<ColorId, IndexMap<L, Id>>,
-    // TODO: Can I remove this?
+    // Very useful for compare
     colored_equivalences: IndexMap<Id, BTreeSet<ColorId>>,
     #[cfg(feature = "keep_splits")]
     /// Case splits.
@@ -255,8 +257,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
 impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// Return a new map of `OpId` (operation id) to `Id` (eclass id) for all eclasses.
-    pub fn classes_by_op_id(&self) -> BTreeMap<OpId, IndexSet<Id>> {
-        self.classes_by_op.clone()
+    pub fn classes_by_op_id(&self) -> &BTreeMap<OpId, IndexSet<Id>> {
+        &self.classes_by_op
     }
 }
 
@@ -440,18 +442,24 @@ impl<L: Language, N: Analysis<L>> std::ops::Index<Id> for EGraph<L, N> {
     type Output = EClass<L, N::Data>;
     fn index(&self, id: Id) -> &Self::Output {
         let id = self.find(id);
-        self.classes[usize::from(id)]
-            .as_ref()
-            .unwrap_or_else(|| panic!("Invalid id {}", id))
+        dassert!(self.classes.len() > usize::from(id), "Invalid id {}", id);
+        dassert!(self.classes[usize::from(id)].is_some(), "Invalid id {}", id);
+        unsafe {
+            self.classes.get_unchecked(usize::from(id))
+                .as_ref().unwrap_unchecked()
+        }
     }
 }
 
 impl<L: Language, N: Analysis<L>> std::ops::IndexMut<Id> for EGraph<L, N> {
     fn index_mut(&mut self, id: Id) -> &mut Self::Output {
-        let id = self.find(id);
-        self.classes[usize::from(id)]
-            .as_mut()
-            .unwrap_or_else(|| panic!("Invalid id {}", id))
+        let id = self.find_mut(id);
+        dassert!(self.classes.len() > usize::from(id), "Invalid id {}", id);
+        dassert!(self.classes[usize::from(id)].is_some(), "Invalid id {}", id);
+        unsafe {
+            self.classes.get_unchecked_mut(usize::from(id))
+                .as_mut().unwrap_unchecked()
+        }
     }
 }
 
@@ -1519,6 +1527,15 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     }
 }
 
+/// Used to specify how to filter colored_equalities. Always includes self.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+pub(crate) enum ColorFilters {
+    Descendants,
+    Parents,
+    Lineage,
+}
+
+
 // ***  Colored Implementation  ***
 impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     #[allow(missing_docs)]
@@ -1660,10 +1677,17 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
         self.colors[usize::from(color)].as_mut()
     }
+    
+    pub fn get_colored_equivalences(&self, id: Id) -> Option<&BTreeSet<ColorId>> {
+        self.colored_equivalences.get(&id)
+    }
 
-    fn get_equalities_with_filter(&self, id: Id, filter: Box<dyn Fn(&ColorId) -> bool>)
-        -> Option<Box<dyn Iterator<Item = (ColorId, Id)> + '_>> {
+    pub fn get_equalities_with_filter(&self, id: Id, color: Option<ColorId>, filter: ColorFilters)
+        -> Option<impl Iterator<Item = (ColorId, Id)> + '_> {
         iassert!(self.is_clean(), "get_equalities_with_filter should only be called on a clean egraph");
+        if self.colors.len() == 0 {
+            return None;
+        }
         let id = self.find(id);
         // For each equality we want to only take an Id with its earliest colors (and not in any
         // of its descendants). We do not repeat a black eclass unnecessarily, but we do repeat a
@@ -1672,72 +1696,38 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         if colors.is_none() {
             return None;
         }
-        let mut colored_eqs: BTreeMap<_, IndexSet<_>> = Default::default();
-        for c in colors.unwrap().iter().sorted_by_key(|c| self.color_depth(**c)) {
-            if !filter(c) {
-                continue;
-            }
-            let c = *c;
-            let eqs = self.get_color(c).unwrap().equality_class(self, id);
-            'outer: for eq in eqs {
-                for p in self.get_colors_parents(c) {
-                    if colored_eqs.contains_key(p) && colored_eqs[p].contains(&eq) {
-                        continue 'outer;
+        let set = unsafe { colors.unwrap_unchecked() };
+        if set.is_empty() || (filter == ColorFilters::Parents && color.is_none()) { return None; }
+        let it = set.iter().copied().filter(|ce|
+            if let Some(&co) = color.as_ref() {
+                match filter {
+                    ColorFilters::Descendants => {
+                        *ce == co || self.get_color(*ce).unwrap().parents().contains(&co)
+                    }
+                    ColorFilters::Parents => {
+                        *ce == co || self.get_color(co).unwrap().parents().contains(ce)
+                    }
+                    ColorFilters::Lineage => {
+                        *ce == co || self.get_color(co).unwrap().parents().contains(ce) ||
+                                self.get_color(*ce).unwrap().parents().contains(&co)
                     }
                 }
-                colored_eqs.entry(c).or_default().insert(eq);
-            }
-        }
-        return Some(Box::new(colored_eqs.into_iter()
-            .flat_map(|(c, ids)| ids.into_iter().map(move |id| (c, id)))));
-    }
-
-    /// Returns an iterator over all equalities for the given id in the given color and its parents
-    pub fn get_base_equalities(&self, opt_color: Option<ColorId>, id: Id)
-                               -> Option<Box<dyn Iterator<Item = Id> + '_>> {
-        let filter: Box<dyn Fn(&ColorId) -> bool> = {
-            if let Some(c) = opt_color {
-                let mut res = self.get_colors_parents(c).into_iter().copied().collect_vec();
-                res.push(c);
-                Box::new(move |c_id: &ColorId| { *c_id == c || res.contains(c_id) })
             } else {
-                Box::new(|_c_id: &ColorId| { false })
-            }
-        };
-        return if let Some(x) = self.get_equalities_with_filter(id, filter) {
-            Some(Box::new(x.map(|(_, id)| id)))
-        } else {
-            None
-        }
-    }
-
-    /// Returns an iterator over all equalities the color's children (not including the color itself)
-    pub fn get_decendent_colored_equalities(&self, opt_color: Option<ColorId>, id: Id)
-        -> Option<impl IntoIterator<Item = (ColorId, Id)> + '_> {
-        let filter: Box<dyn Fn(&ColorId) -> bool> = {
-            if let Some(c) = opt_color {
-                let res = self.get_color(c).unwrap().collect_decendents(self);
-                Box::new(move |c_id: &ColorId| { *c_id == c || res.contains(c_id) })
-            } else {
-                Box::new(|_c_id: &ColorId| { true })
-            }
-        };
-        self.get_equalities_with_filter(id, filter)
-    }
-
-    /// Returns an iterator over all equalities for the given lineage
-    pub fn get_lineage_equalities(&self, opt_color: Option<ColorId>, id: Id)
-        -> Option<Box<dyn Iterator<Item = (ColorId, Id)> + '_>> {
-        let filter: Box<dyn Fn(&ColorId) -> bool> = {
-            if let Some(c) = opt_color {
-                let mut res = self.get_colors_parents(c).into_iter().copied().collect_vec();
-                res.extend(self.get_color(c).unwrap().collect_decendents(self));
-                Box::new(move |c_id: &ColorId| { *c_id == c || res.contains(c_id) })
-            } else {
-                Box::new(|_c_id: &ColorId| { true })
-            }
-        };
-        self.get_equalities_with_filter(id, filter)
+                match filter {
+                    ColorFilters::Descendants => {
+                        true
+                    }
+                    ColorFilters::Parents => {
+                        unreachable!()
+                    }
+                    ColorFilters::Lineage => {
+                        true
+                    }
+                }
+            }).sorted_unstable_by_key(|c| self.get_colors_parents(*c).len());
+        Some(it.into_iter().flat_map(move |c|
+            zip(repeat(c), self.get_color(c).unwrap().equality_class(self, id)))
+            .unique_by(|(_, id)| *id))
     }
 
     pub fn color_sizes(&self) -> impl Iterator<Item = (ColorId, usize)> + '_ {

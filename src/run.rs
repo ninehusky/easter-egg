@@ -408,6 +408,7 @@ where
         }
         check_rules(&rules);
         self.egraph.rebuild();
+        warn!("Iter limit is {}", self.iter_limit);
         loop {
             let mut result = self.run_one(&rules);
             if result.is_ok() {
@@ -431,6 +432,7 @@ where
                     total_time: Default::default(),
                     searched: Default::default(),
                 });
+                warn!("Iteration data:\n {}", self.iterations.last().unwrap());
                 break;
             } else {
                 if let Some(i) = self.iterations.last() {

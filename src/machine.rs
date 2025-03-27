@@ -1,18 +1,26 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::cmp::max;
 use std::collections::BTreeSet;
+use std::ops::DerefMut;
 use std::rc::Rc;
+use std::sync::Arc;
 use crate::*;
 use indexmap::{IndexMap, IndexSet};
 use invariants::dassert;
 use itertools::{Either, Itertools};
 use itertools::Either::{Right, Left};
 use lazy_static::lazy_static;
-use log::trace;
-use smallvec::{SmallVec, smallvec};
+use log::{trace, warn};
 use crate::expression_ops::{IntoTree, RecExpSlice, Tree};
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
+use crate::egraph::ColorFilters;
+
+thread_local! {
+    static CONTEXTS: RefCell<Vec<MachineContext>> = RefCell::new(Vec::with_capacity(4000));
+    static REG: RefCell<Vec<Id>> = RefCell::new(Vec::with_capacity(200));
+    static LOOKUP: RefCell<Vec<Id>> = RefCell::new(Vec::with_capacity(200));
+}
 
 lazy_static! {
     static ref BIND_LIMIT: AtomicI32 = AtomicI32::new(1000);
@@ -22,20 +30,18 @@ pub fn set_global_bind_limit(limit: usize) {
     BIND_LIMIT.store(limit as i32, Ordering::Relaxed);
 }
 
-type EarlyStopFn<'a, L, N> = Rc<RefCell<dyn FnMut(&Machine<'a, L, N>) -> bool>>;
 
 /// An iterator for match results
 struct Machine<'a, L: Language, N: Analysis<L>> {
-    reg: Vec<Id>,
+    reg: &'a mut (dyn DerefMut<Target = Vec<Id>> + 'a),
     // a buffer to re-use for lookups
-    lookup: Vec<Id>,
+    lookup: &'a mut (dyn DerefMut<Target = Vec<Id>> + 'a),
     color: Option<ColorId>,
     egraph: &'a EGraph<L, N>,
     instructions: &'a [Instruction<L>],
-    subst: Subst,
+    subst: &'a Subst,
     add_colors: bool,
-    stack: Vec<MachineContext>,
-    early_stop: Option<EarlyStopFn<'a, L, N>>,
+    stack: &'a mut (dyn DerefMut<Target = Vec<MachineContext>> + 'a),
     bind_limit: i32,
 }
 
@@ -76,44 +82,61 @@ struct MachineContext {
     instruction_index: usize,
     color: Option<ColorId>,
     truncate: usize,
-    to_push: SmallVec<[Id; 8]>,
+    to_push: Either<Option<Id>, *const [Id]>,
 }
 
 impl MachineContext {
-    fn new(instruction_index: usize, color: Option<ColorId>, truncate: usize, to_push: SmallVec<[Id; 8]>) -> Self {
+    #[inline(always)]
+    fn new_children(instruction_index: usize, color: Option<ColorId>, truncate: usize, to_push: *const [Id]) -> Self {
         Self {
             instruction_index,
             color,
             truncate,
-            to_push
+            to_push: Right(to_push)
+        }
+    }
+
+    #[inline(always)]
+    fn new(instruction_index: usize, color: Option<ColorId>, truncate: usize, to_push: Option<Id>) -> Self {
+        Self {
+            instruction_index,
+            color,
+            truncate,
+            to_push: Left(to_push)
         }
     }
 }
 
 impl<'a, L: Language, A: Analysis<L>> Machine<'a, L, A> {
+    /// Creates a new machine while reusing vector of machine contexts to prevent reallocation
+    #[inline(always)]
     pub(crate) fn new(
+        stack: &'a mut (impl DerefMut<Target = Vec<MachineContext>> + 'a),
+        reg: &'a mut (dyn DerefMut<Target = Vec<Id>> + 'a),
+        lookup: &'a mut (dyn DerefMut<Target = Vec<Id>> + 'a),
         color: Option<ColorId>,
         egraph: &'a EGraph<L, A>,
         instructions: &'a [Instruction<L>],
-        subst: Subst,
+        subst: &'a Subst,
         add_colors: bool,
     ) -> Self {
-        let mut stack: Vec<MachineContext> = Vec::with_capacity(4096);
-        stack.push(MachineContext::new(0, color, 1, SmallVec::new()));
+        stack.clear();
+        reg.clear();
+        lookup.clear();
+        stack.push(MachineContext::new(0, color, 1, None));
         Machine {
-            reg: vec![],
-            lookup: vec![],
+            reg,
+            lookup,
             color,
             egraph,
             instructions,
             subst,
             add_colors,
             stack,
-            early_stop: None,
             bind_limit: BIND_LIMIT.load(Ordering::Relaxed),
         }
     }
-
+    
     #[inline(always)]
     fn reg(&self, reg: Reg) -> Id {
         self.reg[reg.0 as usize]
@@ -122,7 +145,7 @@ impl<'a, L: Language, A: Analysis<L>> Machine<'a, L, A> {
     #[inline(always)]
     fn for_each_matching_node<D>(
         &mut self,
-        eclass: &EClass<L, D>,
+        eclass: &'a EClass<L, D>,
         node: &L,
         index: usize,
         out: &Reg,
@@ -130,7 +153,6 @@ impl<'a, L: Language, A: Analysis<L>> Machine<'a, L, A> {
         where
             L: Language,
     {
-        #[allow(enum_intrinsics_non_enums)]
         if eclass.nodes.len() < 50 {
             eclass
                 .nodes
@@ -165,12 +187,12 @@ impl<'a, L: Language, A: Analysis<L>> Machine<'a, L, A> {
     }
 
     #[inline(always)]
-    fn run_foreach(&mut self, index: usize, out: &Reg, matched: &L) {
+    fn run_foreach(&mut self, index: usize, out: &Reg, matched: &'a L) {
         let out = *out;
         trace!("Pusing to stack color: {:?}, truncate to {} and push {}", self.color, out.0, matched.children().iter().join(", "));
-        let to_push = SmallVec::from_slice(matched.children());
+        let to_push  = matched.children();
         self.bind_limit -= 1;
-        self.stack.push(MachineContext::new(index + 1, self.color, out.0 as usize, to_push));
+        self.stack.push(MachineContext::new_children(index + 1, self.color, out.0 as usize, to_push));
     }
 }
 
@@ -190,19 +212,17 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
             let mut current_state = self.stack.pop().unwrap();
             trace!("Instruction index {} - Popped state with color {:?}", current_state.instruction_index, current_state.color);
             self.reg.truncate(current_state.truncate);
-            self.reg.extend(current_state.to_push.drain(..));
-            self.color = current_state.color;
-            let early = std::mem::take(&mut self.early_stop);
-            if let Some(f) = early.as_ref() {
-                let mut r = f.borrow_mut();
-                if r(self) {
-                    continue;
+            match &current_state.to_push {
+                Left(oid) => { self.reg.extend(oid.iter()) }
+                Right(ids) => unsafe {
+                    let slice = ids.as_ref().unwrap();
+                    self.reg.extend(slice.iter());
                 }
             }
-            self.early_stop = early;
+            self.color = current_state.color;
             let mut index = current_state.instruction_index;
             while index < instructions.len() {
-                let instruction = &instructions[index];
+                let instruction = unsafe {&instructions.get_unchecked(index) };
                 match instruction {
                     Instruction::Bind { eclass, out, node } => {
                         let class_color = egraph[self.reg(*eclass)].color();
@@ -230,7 +250,7 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                             };
                             let out = *out;
                             trace!("Pushing to stack color: {:?}, truncate to {} and push {}", new_color, out.0, id);
-                            machine.stack.push(MachineContext::new(index + 1, new_color, out.0 as usize, smallvec![id]));
+                            machine.stack.push(MachineContext::new(index + 1, new_color, out.0 as usize, Some(id)));
                         };
 
                         match top_pat {
@@ -261,17 +281,17 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                         let fixed_j = egraph.opt_colored_find(self.color, self.reg(*j));
                         trace!("Instruction index {} - Comparing (color: {:?}) reg {} and reg {} (found to be {} and {})", index, self.color, i.0, j.0, fixed_i, fixed_j);
                         if fixed_i != fixed_j {
-                            if let Some(eqs) = egraph.get_base_equalities(self.color, fixed_i) {
-                                if eqs.into_iter().any(|id| id == fixed_j) {
-                                    trace!("Found base match for compare");
-                                    continue;
-                                }
-                            }
                             if add_colors {
-                                if let Some(eqs) = egraph.get_decendent_colored_equalities(self.color, fixed_i) {
-                                    for (cid, _id) in eqs.into_iter().filter(|(_cid, id)| *id == fixed_j) {
-                                        trace!("Pushing to stack with new color {:?}", cid);
-                                        self.stack.push(MachineContext::new(index + 1, Some(cid), self.reg.len(), smallvec![]));
+                                if let Some(ieqs) = egraph.get_colored_equivalences(fixed_i) {
+                                    for c in ieqs {
+                                        if self.color.is_some() && 
+                                            !egraph.get_colors_parents(*c).contains(self.color.as_ref().unwrap()) {
+                                            continue
+                                        }
+                                        if egraph.colored_find(*c, fixed_i) == egraph.colored_find(*c, fixed_j) {
+                                            trace!("Pushing to stack with new color {:?}", c);
+                                            self.stack.push(MachineContext::new(index + 1, Some(*c), self.reg.len(), None));
+                                        }
                                     }
                                 }
                             }
@@ -293,7 +313,8 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                                     }
                                 }
                                 ENodeOrReg::Reg(r) => {
-                                    self.lookup.push(egraph.find(self.reg(*r)));
+                                    let r = self.reg(*r);
+                                    self.lookup.push(egraph.find(r));
                                 }
                             }
                         }
@@ -305,19 +326,10 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                     }
                     Instruction::ColorJump { orig, out } => {
                         let id = egraph.find(self.reg(*orig));
-                        let eq_it: Option<Box<dyn Iterator<Item=(ColorId, Id)>>> = if !add_colors {
-                            if let Some(c) = self.color {
-                                let c = c;
-                                if let Some(b) = egraph.get_base_equalities(self.color, id) {
-                                    Some(Box::new(b.map(move |id| (c, id))))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                Some(Box::new(std::iter::empty()))
-                            }
+                        let eq_it: Option<_> = if !add_colors {
+                            egraph.get_equalities_with_filter(id, self.color, ColorFilters::Parents)
                         } else {
-                            egraph.get_lineage_equalities(self.color, id)
+                            egraph.get_equalities_with_filter(id, self.color, ColorFilters::Lineage)
                         };
                         trace!("Instruction index {} - Color jumping from reg {}={} (color: {:?})", index, orig.0, self.reg(*orig), self.color);
                         if let Some(eqs) = eq_it {
@@ -332,16 +344,24 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                                 } else {
                                     self.color
                                 };
-                                self.stack.push(MachineContext::new(index + 1, color, out.0 as usize, smallvec![jumped_id]));
+                                self.stack.push(MachineContext::new(index + 1, color, out.0 as usize, Some(jumped_id)));
                             }
                         }
                         trace!("Done color jump continuing run with color {:?} and reg {}={}", self.color, orig.0, self.reg(*orig));
                         dassert!(self.reg.len() == out.0 as usize);
-                        self.reg.push(self.reg(*orig));
+                        let r = self.reg(*orig);
+                        self.reg.push(r);
                         // Not breaking so will continue to next instruction with current setup.
                     }
                     Instruction::Not { sub_prog } => {
-                        if sub_prog.inner_run_from(egraph, self, false).next().is_some() {
+                        let mut stack = vec![];
+                        let mut reg = vec![];
+                        let mut lookup = vec![];
+                        let mut inner = &mut stack;
+                        let mut inner_reg = &mut reg;
+                        let mut inner_lookup = &mut lookup;
+                        let n = sub_prog.inner_run_from(egraph, &mut inner, &mut inner_reg, &mut inner_lookup, self, false).next();
+                        if n.is_some() {
                             break;
                         }
                     }
@@ -352,37 +372,45 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                         let done: Rc<RefCell<BTreeSet<(Option<ColorId>, Id)>>> = Default::default();
                         let cloned = done.clone();
                         let out = *out;
-                        let early_stop = Rc::new(RefCell::new(move |machine: &Machine<'a, L, A>| {
-                            if machine.reg.len() <= out.0 as usize {
-                                return false;
-                            }
-                            let id = machine.reg(out);
-                            if done.borrow().contains(&(machine.color.clone(), id)) || done.borrow().contains(&(None, id)) {
-                                return true;
-                            }
-                            if let Some(c) = machine.color {
-                                if let Some(mut eqs) = machine.egraph.get_base_equalities(Some(c), id) {
-                                    let parents = machine.egraph.get_colors_parents(c);
-                                    if eqs.any(|id| done.borrow().contains(&(None, id)) ||
-                                        done.borrow().contains(&(Some(c), id)) ||
-                                        parents.iter().any(|p| done.borrow().contains(&(Some(*p), id)))) {
-                                        return true;
-                                    }
-                                }
-                            }
-                            false
-                        }));
-                        let done = cloned;
+                        let done = cloned; 
                         sub_progs.iter().for_each(|p| {
-                            p.run_for_or(egraph, self, add_colors, early_stop.clone())
-                                .for_each(|s| {
-                                    done.borrow_mut().insert((s.color.clone(), *s.get(*root).unwrap()));
-                                })
+                            let mut stack = vec![];
+                            let mut reg = vec![];
+                            let mut lookup = vec![];
+                            let mut inner = &mut stack;
+                            let mut inner_reg = &mut reg;
+                            let mut inner_lookup = &mut lookup;
+                            let machine = p.run_for_or(egraph, &mut inner, &mut inner_reg, &mut inner_lookup, self, add_colors);
+                            for s in machine {
+                                done.borrow_mut().insert((s.color.clone(), *s.get(*root).unwrap()));
+                                // TODO: Have this early stop thing back if I ever reuse or:
+                                // let early_stop = Rc::new(RefCell::new(move |machine: &Machine<'a, L, A>| {
+                                //     if machine.reg.len() <= out.0 as usize {
+                                //         return false;
+                                //     }
+                                //     let id = machine.reg(out);
+                                //     if done.borrow().contains(&(machine.color.clone(), id)) || done.borrow().contains(&(None, id)) {
+                                //         return true;
+                                //     }
+                                //     if let Some(c) = machine.color {
+                                //         if let Some(mut eqs) = machine.egraph.get_equalities_with_filter(id, Some(c), ColorFilters::Parents) {
+                                //             let parents = machine.egraph.get_colors_parents(c);
+                                //             // TODO: This seems like a bug in or
+                                //             if eqs.any(|(_, id)| done.borrow().contains(&(None, id)) ||
+                                //                 done.borrow().contains(&(Some(c), id)) ||
+                                //                 parents.iter().any(|p| done.borrow().contains(&(Some(*p), id)))) {
+                                //                 return true;
+                                //             }
+                                //         }
+                                //     }
+                                //     false
+                                // }));
+                            }
                         });
                         for (color, id) in done.borrow().iter() {
                             if let Some(c) = color {
-                                if let Some(eqs) = egraph.get_base_equalities(Some(*c), *id) {
-                                    for eq in eqs {
+                                if let Some(eqs) = egraph.get_equalities_with_filter(*id, Some(*c), ColorFilters::Parents) {
+                                    for (_, eq) in eqs {
                                         if done.borrow().contains(&(None, eq)) ||
                                             egraph.get_colors_parents(*c)
                                                 .into_iter()
@@ -393,7 +421,7 @@ impl<'a, L: Language, A: Analysis<L>> Iterator for Machine<'a, L, A> {
                                 }
                             }
                             self.stack.push(MachineContext::new(
-                                index + 1, *color, out.0 as usize, smallvec![*id],
+                                index + 1, *color, out.0 as usize, Some(*id),
                             ));
                         }
                         break;
@@ -461,7 +489,7 @@ impl<L: Language> Compiler<L> {
             let mut size = 0;
             match node {
                 ENodeOrVar::ENode(n, _) => {
-                    size = 1;
+                    size += 1;
                     for &child in n.children() {
                         free.extend(&self.free_vars[usize::from(child)]);
                         size += self.subtree_size[usize::from(child)];
@@ -770,49 +798,62 @@ impl<L: Language> Program<L> {
                  "Tried to run a colored program on an eclass with a different color: {:?} vs {:?}",
                  opt_color, class_color);
         let opt_color = class_color;
-        let mut machine = Machine::new(opt_color, egraph, &self.instructions, self.subst.clone(), run_color);
-        let bind_limit = machine.bind_limit as u32;
-        assert_eq!(machine.reg.len(), 0);
-        machine.reg.push(eclass);
-        let matches = (&mut machine).take(limit).collect_vec();
-        let bound = bind_limit - (max(machine.bind_limit, 0) as u32);
-        log::trace!("Ran program, found {:?}", matches);
-        if matches.is_empty() {
-            None
-        } else {
-            Some(SearchMatches::collect_matches(egraph, eclass, matches, bound))
-        }
+        CONTEXTS.with(|c| {
+            REG.with(|reg| {
+                LOOKUP.with(|lookup| {
+                    let mut borrow = c.borrow_mut();
+                    let mut reg = reg.borrow_mut();
+                    let mut lookup = lookup.borrow_mut();
+                    let mut machine = Machine::new(&mut borrow, &mut reg, &mut lookup, opt_color, egraph, &self.instructions, &self.subst, run_color);
+                    let bind_limit = machine.bind_limit as u32;
+                    assert_eq!(machine.reg.len(), 0);
+                    machine.reg.push(eclass);
+                    let matches = (&mut machine).take(limit).collect_vec();
+                    let bound = bind_limit - (max(machine.bind_limit, 0) as u32);
+                    log::trace!("Ran program, found {:?}", matches);
+                    if matches.is_empty() {
+                        None
+                    } else {
+                        Some(SearchMatches::collect_matches(egraph, eclass, matches, bound))
+                    }
+                })
+            })
+        })
     }
 
-    fn inner_run_from<'a, A>(
+    fn inner_run_from<'b, 'a: 'b, A>(
         &'a self,
         egraph: &'a EGraph<L, A>,
+        stack: &'b mut &'b mut Vec<MachineContext>,
+        reg: &'b mut &'b mut Vec<Id>,
+        lookup: &'b mut &'b mut Vec<Id>,
         old_machine: &Machine<'a, L, A>,
         add_colors: bool,
-    ) -> impl Iterator<Item = Subst> + 'a
+    ) -> impl Iterator<Item = Subst> + 'b
         where
             A: Analysis<L>,
     {
-        let mut machine = Machine::new(old_machine.color, egraph, &self.instructions, self.subst.clone(), add_colors);
-        machine.reg = old_machine.reg.clone();
+        let machine = Machine::new(stack, reg, lookup, old_machine.color, egraph, &self.instructions, &self.subst, add_colors);
+        machine.reg.extend(old_machine.reg.iter().copied());
         machine.stack[0].truncate = machine.reg.len();
         machine
     }
 
-    fn run_for_or<'a, A>(
+    fn run_for_or<'b, 'a: 'b, A>(
         &'a self,
         egraph: &'a EGraph<L, A>,
+        stack: &'b mut &'b mut Vec<MachineContext>,
+        reg: &'b mut &'b mut Vec<Id>,
+        lookup: &'b mut &'b mut Vec<Id>,
         old_machine: &Machine<'a, L, A>,
         run_color: bool,
-        early_stop: EarlyStopFn<'a, L, A>,
-    ) -> impl Iterator<Item = Subst> + 'a
+    ) -> impl Iterator<Item = Subst> + 'b
         where
             A: Analysis<L>,
     {
-        let mut machine = Machine::new(old_machine.color, egraph, &self.instructions, self.subst.clone(), run_color);
-        machine.reg = old_machine.reg.clone();
+        let mut machine = Machine::new(stack, reg, lookup, old_machine.color, egraph, &self.instructions, &self.subst, run_color);
+        machine.reg.extend(old_machine.reg.iter().copied());
         machine.stack[0].truncate = machine.reg.len();
-        machine.early_stop = Some(early_stop);
         machine
     }
 
