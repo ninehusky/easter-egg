@@ -35,8 +35,8 @@ pub struct Color<L: Language, N: Analysis<L>> {
     /// Used to determine for each a colored equality class what is the black colored class.
     /// Relevant when a colored edge was added.
     pub(crate) children: Vec<ColorId>,
-    pub(crate) parent: Option<ColorId>,
-    parents: Vec<ColorId>,
+    pub(crate) immediate_parents: Vec<ColorId>,
+    all_parents: Vec<ColorId>,
     phantom: std::marker::PhantomData<(L, N)>,
 }
 
